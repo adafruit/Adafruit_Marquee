@@ -29,8 +29,9 @@ void setup() {
   }
   Serial.println("Adafruit Marquee simple test");
 
-  if (!marquee.begin()) {
-    Serial.println("Failed to initialize the Marquee client!");
+  mq_begin_status_t status = marquee.begin();
+  if (status != SUCCESS) {
+    Serial.printf("Failed to initialize the Marquee client: %d\n", status);
     while (1) {
       delay(10);
     }
