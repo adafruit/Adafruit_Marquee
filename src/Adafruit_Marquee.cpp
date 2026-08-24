@@ -20,6 +20,10 @@
 #include "Adafruit_TinyUSB.h"
 #include "SdFat_Adafruit_Fork.h"
 
+#include <functional>
+#include <map>
+#include <string>
+
 // for flashTransport definition
 #define ADAFRUIT_MARQUEE_INTERNAL
 #include "flash_config.h"
@@ -33,7 +37,6 @@ static Adafruit_SPIFlash flash(&flashTransport);
 
 // file system object from SdFat
 static FatVolume fatfs;
-
 static FatFile root;
 static FatFile file;
 
@@ -41,10 +44,9 @@ static FatFile file;
 static Adafruit_USBD_MSC usb_msc;
 
 // Check if flash is formatted
-bool Adafruit_Marquee::fs_formatted = false;
-
+bool Adafruit_Marquee::fs_formatted;
 // Set to true when the PC writes to flash
-volatile bool Adafruit_Marquee::fs_changed = true;
+volatile bool Adafruit_Marquee::fs_changed;
 
 // Callback invoked when received READ10 command.
 // Copy disk's data to buffer (up to bufsize) and
@@ -77,15 +79,73 @@ static void msc_flush_cb (void) {
 }
 
 /*!
+    @brief  Factory function that constructs and begins an Adafruit_EPD panel.
+*/
+using FnCreateAdafruit_EPD = std::function<Adafruit_EPD *(
+    int16_t, int16_t, int16_t, int16_t, int16_t, SPIClass *, thinkinkmode_t)>;
+
+/*! @brief Maps a config panel identifier to its Adafruit_EPD factory. */
+using Adafruit_EPDFactory = std::map<std::string, FnCreateAdafruit_EPD>;
+
+/*!
+    @brief  Config panel identifier to Adafruit_EPD factory table.
+
+    Keys are the `display.panel` values accepted in marquee-cfg.json and are
+    matched verbatim, so adding support for a panel means adding one entry
+    here. The identifiers follow the `<size>-<mode>-<suffix>` shape of the
+    corresponding ThinkInk class name, with the mode lowercased.
+    @return A reference to the factory map.
+*/
+static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
+  static const Adafruit_EPDFactory adafruitEPDFactory =
+      {
+          {"290-grayscale4-FPC7519",
+           [](int16_t dc, int16_t rst, int16_t cs, int16_t sram_cs,
+              int16_t busy, SPIClass *spi,
+              thinkinkmode_t mode) -> Adafruit_EPD * {
+             auto *d = new ThinkInk_290_Grayscale4_FPC7519(
+                 dc, rst, cs, sram_cs, busy, spi);
+             d->begin(mode);
+             return d;
+           }},
+          {"213-tricolor-MFGNR",
+           [](int16_t dc, int16_t rst, int16_t cs, int16_t sram_cs,
+              int16_t busy, SPIClass *spi,
+              thinkinkmode_t mode) -> Adafruit_EPD * {
+             auto *d = new ThinkInk_213_Tricolor_MFGNR(
+                 dc, rst, cs, sram_cs, busy, spi);
+             d->begin(mode);
+             return d;
+           }},
+
+      };
+  return adafruitEPDFactory;
+}
+
+/*!
  * @brief Creates a new instance of the Adafruit Marquee client.
  */
 Adafruit_Marquee::Adafruit_Marquee() {
+  _display = nullptr;
+  _pin_cs = -1;
+  _pin_dc = -1;
+  _pin_rst = -1;
+  _pin_busy = -1;
+  _pin_sram_cs = -1;
+  _rotation = 0;
+  fs_formatted = false;
+  fs_changed = true;
 }
 
 /*!
  * @brief Destructor.
  */
-Adafruit_Marquee::~Adafruit_Marquee() {}
+Adafruit_Marquee::~Adafruit_Marquee() {
+  if (_display) {
+    delete _display;
+    _display = nullptr;
+  }
+}
 
 /*!
  * @brief Initializes the Marquee client.
@@ -127,24 +187,118 @@ mq_begin_status_t Adafruit_Marquee::begin() {
     return _begin_status;
   }
 
-  // Attempt to parse the Marquee config file's contents
-  int cfg_version = _cfg_doc["cfg_version"]; // 2
-  const char* name = _cfg_doc["name"]; // "Office"
+  // Attempt to parse the marquee config file
   JsonObject display = _cfg_doc["display"];
-  const char* display_driver = display["driver"]; // "SSD1680"
-  const char* display_panel = display["panel"]; // "adafruit-magtag"
-  int display_width = display["width"]; // 128
-  int display_height = display["height"]; // 296
-  int display_rotation = display["rotation"]; // 3
-  const char* display_mode = display["mode"]; // "mono"
-  const char* interface_type = _cfg_doc["interface"]["type"]; // "builtin"
-  const char* network_wifi_ssid = _cfg_doc["network"]["wifi_ssid"]; // "YOUR_SSID"
-  const char* network_wifi_password = _cfg_doc["network"]["wifi_password"]; // "YOUR_WIFI_PASSWORD"
-  const char* adafruit_io_username = _cfg_doc["adafruit_io"]["username"]; // "YOUR_AIO_USERNAME"
-  const char* adafruit_io_key = _cfg_doc["adafruit_io"]["key"]; // "YOUR_AIO_KEY"
+  const char *display_panel = display["panel"];
+  _rotation = display["rotation"] | 0;
+
+  if (!parseThinkInkMode(display["mode"])) {
+    _begin_status = ERR_TI_MODE_UNSUPPORTED;
+    return _begin_status;
+  }
+
+  // Attempt to parse SPI interface
+  JsonObject interface = _cfg_doc["interface"];
+  const char *interface_type = interface["type"];
+  if (!interface_type || (strcmp(interface_type, "spi_epd") != 0 &&
+                          strcmp(interface_type, "builtin") != 0)) {
+    _begin_status = ERR_IFACE_UNSUPPORTED;
+    return _begin_status;
+  }
+
+  JsonObject pins = interface["pins"];
+  _pin_cs = pins["cs"] | -1;
+  _pin_dc = pins["dc"] | -1;
+  _pin_rst = pins["reset"] | -1;
+  _pin_busy = pins["busy"] | -1;
+  _pin_sram_cs = pins["sram_cs"] | -1;
+
+  if (!createEPD(display_panel)) {
+    _begin_status = ERR_EPD_PANEL_UNSUPPORTED;
+    return _begin_status;
+  }
+  // TODO: Maybe refactor setrotation and other config stuff out of this function?
+  _display->setRotation(_rotation);
+
+  // Parse network and Adafruit IO credentials
+  _ssid = _cfg_doc["network"]["wifi_ssid"];
+  _pass = _cfg_doc["network"]["wifi_password"];
+  _aio_username = _cfg_doc["adafruit_io"]["username"];
+  _aio_key = _cfg_doc["adafruit_io"]["key"];
+  _io = new AdafruitIO_WiFi(_aio_username, _aio_key, _ssid, _pass);
 
   _begin_status = SUCCESS;
   return _begin_status;
 }
 
+/*!
+ * @brief Connects to the Adafruit IO service.
+ * @param timeout The maximum time to wait for a connection, in milliseconds.
+ * @returns True if connection succeeded, otherwise false.
+ */
+bool Adafruit_Marquee::connect(unsigned long timeout) {
+  if (!_io)
+    return false;
 
+  // Attempt to connect to Adafruit IO within the timeout period
+  _io->connect();
+  unsigned long start = millis();
+  while (_io->status() < AIO_CONNECTED) {
+    if (millis() - start >= timeout) {
+      return false;
+    }
+    delay(500);
+  }
+  return true;
+}
+
+
+/*!
+    @brief  Finds and initializes the display panel from the configured
+            panel identifier.
+    @param  panel  The EPD panel name (e.g., "290-grayscale4-FPC7519").
+    @return True if the panel was found and initialized, False otherwise.
+*/
+bool Adafruit_Marquee::createEPD(const char *panel) {
+  if (!panel)
+    return false;
+
+  // Look up the panel identifier in the factory table and create the instance
+  const Adafruit_EPDFactory &adafruitEPDFactory = getAdafruitEPDFactory();
+  Adafruit_EPDFactory::const_iterator it = adafruitEPDFactory.find(panel);
+  if (it == adafruitEPDFactory.end())
+    return false;
+
+  // Creates the panel instance using the factory function
+  _display = it->second(_pin_dc, _pin_rst, _pin_cs, _pin_sram_cs, _pin_busy,
+                        &SPI, _thinkInkMode);
+  if (_display == nullptr)
+    return false;
+
+  return true;
+}
+
+/*!
+ * @brief Parses the ThinkInk mode from the Marquee config file.
+ * @param mode The ThinkInk mode string to parse.
+ * @returns true if the mode was successfully parsed, otherwise false.
+ */
+bool Adafruit_Marquee::parseThinkInkMode(const char* mode) {
+  if (!mode)
+    return false;
+
+  if (strcmp(mode, "THINKINK_MONO") == 0) {
+    _thinkInkMode = THINKINK_MONO;
+  } else if (strcmp(mode, "THINKINK_TRICOLOR") == 0) {
+    _thinkInkMode = THINKINK_TRICOLOR;
+  } else if (strcmp(mode, "THINKINK_GRAYSCALE4") == 0) {
+    _thinkInkMode = THINKINK_GRAYSCALE4;
+  } else if (strcmp(mode, "THINKINK_MONO_PARTIAL") == 0) {
+    _thinkInkMode = THINKINK_MONO_PARTIAL;
+  } else if (strcmp(mode, "THINKINK_QUADCOLOR") == 0) {
+    _thinkInkMode = THINKINK_QUADCOLOR;
+  } else {
+    return false;
+  }
+  return true;
+}

@@ -8,3 +8,4 @@ html
 .vscode
 compile_commands.json
 .cache/
+*.ino.cpp

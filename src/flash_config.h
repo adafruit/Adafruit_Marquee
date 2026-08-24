@@ -3,14 +3,8 @@
  *
  * Selects the on-board flash transport for the current board.
  *
- * Derived from the Adafruit TinyUSB example of the same name:
- * examples/MassStorage/msc_external_flash/flash_config.h (MIT).
- *
- * NOTE: this header *defines* flashTransport, so it must be included from
- * exactly one translation unit -- Adafruit_Marquee.cpp, which defines
- * ADAFRUIT_MARQUEE_INTERNAL first. Including it anywhere else (a sketch, or
- * a second library file) would duplicate flashTransport at link time, so
- * that is rejected below with a readable message instead.
+ * Derived from the Adafruit TinyUSB example:
+ * examples/MassStorage/msc_external_flash/flash_config.h
  */
 #ifndef FLASH_CONFIG_H_
 #define FLASH_CONFIG_H_
