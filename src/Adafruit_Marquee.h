@@ -23,6 +23,8 @@
 #include "Adafruit_TinyUSB.h"
 #include "SdFat_Adafruit_Fork.h"
 
+#define MAX_IO_FEED_NAME_LEN 128
+
 typedef enum {
   SUCCESS = 0,
   ERR_FS_UNFORMATTED = -1,
@@ -53,6 +55,7 @@ private:
   JsonDocument _cfg_doc;
   bool initFilesystem();
   void initUSBMSC();
+  bool initAIO();
   bool createEPD(const char *panel);
   bool parseThinkInkMode(const char* mode);
   Adafruit_EPD *_display; ///< Pointer to the EPD display object
@@ -73,6 +76,8 @@ private:
   AdafruitIO_WiFi *_io; ///< Pointer to the Adafruit IO WiFi client
   AdafruitIO_Feed *_bmp; ///< Pointer to the Adafruit IO feed to subscribe to for bitmap data
   AdafruitIO_Feed *_sleep; ///< Pointer to the Adafruit IO feed to subscribe to for sleep info
+  char _feed_name_bmp[MAX_IO_FEED_NAME_LEN];   ///< Feed key for the bitmap feed
+  char _feed_name_sleep[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the sleep feed
 };
 
 #endif // ADAFRUIT_MARQUEE_H

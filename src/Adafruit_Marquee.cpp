@@ -262,12 +262,11 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   _aio_key = _cfg_doc["adafruit_io"]["key"];
   _device_name = _cfg_doc["name"];
   // Validate
-  if (!_ssid || !_pass || !_aio_username || !_aio_key) {
+  if (!_ssid || !_pass || !_aio_username || !_aio_key || !_device_name) {
     _begin_status = ERR_JSON_DESERIALIZATION;
     return _begin_status;
   }
 
-  _io = new AdafruitIO_WiFi(_aio_username, _aio_key, _ssid, _pass);
   _begin_status = SUCCESS;
   return _begin_status;
 }
@@ -306,12 +305,42 @@ void Adafruit_Marquee::initUSBMSC() {
 }
 
 /*!
+ * @brief Initializes the Adafruit IO client and subscribes to the marquee feeds.
+ * @returns True if initialization succeeded, False otherwise.
+ */
+bool Adafruit_Marquee::initAIO() {
+  // Attempt to create the Adafruit IO client
+  _io = new AdafruitIO_WiFi(_aio_username, _aio_key, _ssid, _pass);
+  if (!_io)
+    return false;
+
+  // Attempt to create the bitmap and sleep feeds for the device
+  snprintf(_feed_name_bmp, sizeof(_feed_name_bmp), "%s.bitmap", _device_name);
+  snprintf(_feed_name_sleep, sizeof(_feed_name_sleep), "%s.sleep",
+           _device_name);
+  _bmp = _io->feed(_feed_name_bmp);
+  _sleep = _io->feed(_feed_name_sleep);
+  if (!_bmp || !_sleep) {
+    return false;
+  }
+  _bmp->onMessage(handleBitmapMsg);
+  _sleep->onMessage(handleSleepMsg);
+
+  Serial.print("Subscribing to feed: ");
+  Serial.println(_feed_name_bmp);
+  Serial.print("Subscribing to feed: ");
+  Serial.println(_feed_name_sleep);
+  return true;
+}
+
+/*!
  * @brief Connects to the Adafruit IO service.
  * @param timeout The maximum time to wait for a connection, in milliseconds.
  * @returns True if connection succeeded, otherwise false.
  */
 bool Adafruit_Marquee::connect(unsigned long timeout) {
-  if (!_io) {
+  if (!initAIO()) {
+    Serial.println("Failed to initialize Adafruit IO client and feeds");
     return false;
   }
 
@@ -325,26 +354,12 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
     delay(500);
   }
 
-  char feed_name[64];
-  snprintf(feed_name, sizeof(feed_name), "%s.bitmap", _device_name);
-  _bmp = _io->feed("marquee-feather.bitmap");
-  // Print bmp feed name
-  Serial.print("Subscribing to feed: ");
-  Serial.println(feed_name);
-
-  memset(feed_name, 0, sizeof(feed_name));
-  snprintf(feed_name, sizeof(feed_name), "%s.sleep", _device_name);
-  _sleep = _io->feed("marquee-feather.sleep");
-  Serial.print("Subscribing to feed: ");
-  Serial.println(feed_name);
-
-  _bmp->onMessage(handleBitmapMsg);
-  _sleep->onMessage(handleSleepMsg);
-
   _bmp->get();
 
   return true;
 }
+
+
 
 void Adafruit_Marquee::run() {
   if (!_io)
