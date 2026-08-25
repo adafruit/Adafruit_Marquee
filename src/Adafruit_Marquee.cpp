@@ -113,7 +113,24 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
              d->begin(mode);
              return d;
            }},
-
+          {"290-grayscale4-EAAMFGN",
+           [](int16_t dc, int16_t rst, int16_t cs, int16_t sram_cs,
+              int16_t busy, SPIClass *spi,
+              thinkinkmode_t mode) -> Adafruit_EPD * {
+             auto *d = new ThinkInk_290_Grayscale4_EAAMFGN(
+                 dc, rst, cs, sram_cs, busy, spi);
+             d->begin(mode);
+             return d;
+           }},
+          {"magtag-2025",
+           [](int16_t dc, int16_t rst, int16_t cs, int16_t sram_cs,
+              int16_t busy, SPIClass *spi,
+              thinkinkmode_t mode) -> Adafruit_EPD * {
+             auto *d = new ThinkInk_290_Grayscale4_EAAMFGN(
+                 dc, rst, cs, sram_cs, busy, spi);
+             d->begin(mode);
+             return d;
+           }},
       };
   return adafruitEPDFactory;
 }
@@ -123,7 +140,7 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
  * @param data The AdafruitIO_Data containing the message.
  */
 void handleBitmapMsg(AdafruitIO_Data *data) {
-  Serial.print("received <- ");
+  Serial.print("Bitmap feed received <- ");
   Serial.println(data->value());
 }
 
@@ -132,7 +149,7 @@ void handleBitmapMsg(AdafruitIO_Data *data) {
  * @param data The AdafruitIO_Data containing the message.
  */
 void handleSleepMsg(AdafruitIO_Data *data) {
-  Serial.print("received <- ");
+  Serial.print("Sleep feed received <- ");
   Serial.println(data->value());
 }
 
@@ -143,11 +160,11 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _display = nullptr;
   _bmp = nullptr;
   _sleep = nullptr;
-  _status = nullptr;
   _ssid = nullptr;
   _pass = nullptr;
   _aio_username = nullptr;
   _aio_key = nullptr;
+  _device_name = nullptr;
   _pin_cs = -1;
   _pin_dc = -1;
   _pin_rst = -1;
@@ -174,28 +191,24 @@ Adafruit_Marquee::~Adafruit_Marquee() {
  *          mq_begin_status_t describing the failure.
  */
 mq_begin_status_t Adafruit_Marquee::begin() {
-  // Configure the USB Mass Storage device
-  flash.begin();
-  usb_msc.setID("Adafruit", "External Flash", "1.0");
-  usb_msc.setReadWriteCallback(msc_read_cb, msc_write_cb, msc_flush_cb);
-  usb_msc.setCapacity(flash.size()/512, 512);
-  usb_msc.setUnitReady(true);
-  usb_msc.begin();
-  if (TinyUSBDevice.mounted()) {
-    TinyUSBDevice.detach();
-    delay(10);
-    TinyUSBDevice.attach();
-  }
 
-  // Attempt to init. file system on the flash
-  fs_formatted = fatfs.begin(&flash);
-  if (!fs_formatted) {
+  // Detach USB *before* touching the flash, mirroring Wippersnapper_FS
+  TinyUSBDevice.detach();
+  delay(500);
+
+  // Attempt to init. the flash chip and the file system on it
+  if (!initFilesystem()) {
+    // Still bring MSC up so the flash is reachable from the host to be fixed
+    initUSBMSC();
     _begin_status = ERR_FS_UNFORMATTED;
     return _begin_status;
   }
 
+  // Reattach FS
+  initUSBMSC();
 
-  File32 cfg = fatfs.open("/marquee-cfg.json", O_RDONLY);
+  // Attempt to open and parse the marquee config file
+  File32 cfg = fatfs.open("/cfg-marquee.json", O_RDONLY);
   if (!cfg) {
     _begin_status = ERR_FS_NO_CFG_FILE;
     return _begin_status;
@@ -208,12 +221,12 @@ mq_begin_status_t Adafruit_Marquee::begin() {
     return _begin_status;
   }
 
-  // Attempt to parse the marquee config file
   JsonObject display = _cfg_doc["display"];
   const char *display_panel = display["panel"];
   _rotation = display["rotation"] | 0;
 
-  if (!parseThinkInkMode(display["mode"])) {
+  const char *display_mode = display["mode"];
+  if (!parseThinkInkMode(display_mode)) {
     _begin_status = ERR_TI_MODE_UNSUPPORTED;
     return _begin_status;
   }
@@ -234,6 +247,7 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   _pin_busy = pins["busy"] | -1;
   _pin_sram_cs = pins["sram_cs"] | -1;
 
+
   if (!createEPD(display_panel)) {
     _begin_status = ERR_EPD_PANEL_UNSUPPORTED;
     return _begin_status;
@@ -246,15 +260,49 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   _pass = _cfg_doc["network"]["wifi_password"];
   _aio_username = _cfg_doc["adafruit_io"]["username"];
   _aio_key = _cfg_doc["adafruit_io"]["key"];
-  // Validate 
+  _device_name = _cfg_doc["name"];
+  // Validate
   if (!_ssid || !_pass || !_aio_username || !_aio_key) {
     _begin_status = ERR_JSON_DESERIALIZATION;
     return _begin_status;
   }
-  _io = new AdafruitIO_WiFi(_aio_username, _aio_key, _ssid, _pass);
 
+  _io = new AdafruitIO_WiFi(_aio_username, _aio_key, _ssid, _pass);
   _begin_status = SUCCESS;
   return _begin_status;
+}
+
+/*!
+    @brief  Initializes the flash chip and mounts the FAT filesystem on it.
+    @return True if the flash came up and the filesystem mounted, else False.
+*/
+bool Adafruit_Marquee::initFilesystem() {
+  if (!flash.begin()) {
+    return false;
+  }
+
+  fs_formatted = fatfs.begin(&flash);
+  return fs_formatted;
+}
+
+/*!
+    @brief  Brings up the USB MSC endpoint, attaches the USB device
+*/
+void Adafruit_Marquee::initUSBMSC() {
+  usb_msc.setID("Adafruit", "External Flash", "1.0");
+  usb_msc.setReadWriteCallback(msc_read_cb, msc_write_cb, msc_flush_cb);
+  usb_msc.setCapacity(flash.size() / 512, 512);
+  usb_msc.setUnitReady(true);
+  usb_msc.begin();
+
+  if (TinyUSBDevice.mounted()) {
+    TinyUSBDevice.detach();
+    delay(10);
+  }
+  TinyUSBDevice.attach();
+
+  // Give time for host to enumerate
+  delay(500);
 }
 
 /*!
@@ -263,8 +311,9 @@ mq_begin_status_t Adafruit_Marquee::begin() {
  * @returns True if connection succeeded, otherwise false.
  */
 bool Adafruit_Marquee::connect(unsigned long timeout) {
-  if (!_io)
+  if (!_io) {
     return false;
+  }
 
   // Attempt to connect to Adafruit IO within the timeout period
   _io->connect();
@@ -276,10 +325,24 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
     delay(500);
   }
 
+  char feed_name[64];
+  snprintf(feed_name, sizeof(feed_name), "%s.bitmap", _device_name);
+  _bmp = _io->feed("marquee-feather.bitmap");
+  // Print bmp feed name
+  Serial.print("Subscribing to feed: ");
+  Serial.println(feed_name);
+
+  memset(feed_name, 0, sizeof(feed_name));
+  snprintf(feed_name, sizeof(feed_name), "%s.sleep", _device_name);
+  _sleep = _io->feed("marquee-feather.sleep");
+  Serial.print("Subscribing to feed: ");
+  Serial.println(feed_name);
+
   _bmp->onMessage(handleBitmapMsg);
   _sleep->onMessage(handleSleepMsg);
 
   _bmp->get();
+
   return true;
 }
 
@@ -297,20 +360,31 @@ void Adafruit_Marquee::run() {
     @return True if the panel was found and initialized, False otherwise.
 */
 bool Adafruit_Marquee::createEPD(const char *panel) {
-  if (!panel)
+  if (!panel) {
     return false;
+  }
 
   // Look up the panel identifier in the factory table and create the instance
   const Adafruit_EPDFactory &adafruitEPDFactory = getAdafruitEPDFactory();
   Adafruit_EPDFactory::const_iterator it = adafruitEPDFactory.find(panel);
-  if (it == adafruitEPDFactory.end())
+  if (it == adafruitEPDFactory.end()) {
+    // Distinct from a construction failure: the identifier in the config file
+    // has no entry in the factory table. Log the known keys so a typo (or a
+    // firmware built before the panel was added) is obvious from the trace.
+    for (Adafruit_EPDFactory::const_iterator k = adafruitEPDFactory.begin();
+         k != adafruitEPDFactory.end(); ++k) {
+    }
     return false;
+  }
 
-  // Creates the panel instance using the factory function
+  // Creates the panel instance using the factory function. Note this also
+  // calls the panel's begin(), which resets the hardware and busy-waits - a
+  // wrong busy/cs pin shows up as a hang between here and the next trace.
   _display = it->second(_pin_dc, _pin_rst, _pin_cs, _pin_sram_cs, _pin_busy,
                         &SPI, _thinkInkMode);
-  if (_display == nullptr)
+  if (_display == nullptr) {
     return false;
+  }
 
   return true;
 }

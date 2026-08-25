@@ -12,13 +12,15 @@
 Adafruit_Marquee marquee;
 
 void setup() {
+  mq_begin_status_t status = marquee.begin();
+
   Serial.begin(115200);
   while (!Serial && millis() < 5000) {
     delay(10);
   }
-  Serial.println("Adafruit Marquee simple test");
 
-  mq_begin_status_t status = marquee.begin();
+  Serial.println("Adafruit Marquee");
+  Serial.printf("Marquee begin() returned: %d\n", status);
   if (status != SUCCESS) {
     Serial.printf("Failed to initialize the Marquee client: %d\n", status);
     while (1) {
@@ -26,6 +28,16 @@ void setup() {
     }
   }
 
+  if (!marquee.connect()) {
+    Serial.println("Failed to connect to WiFi and/or Adafruit IO");
+    while (1) {
+      delay(10);
+    }
+  }
+
+  Serial.println("Connected to Adafruit IO, running Marquee client...");
 }
 
-void loop() { delay(1000); }
+void loop() {
+    marquee.run();
+}

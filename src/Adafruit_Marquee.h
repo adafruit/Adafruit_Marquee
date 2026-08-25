@@ -7,7 +7,7 @@
  * please support Adafruit and open-source hardware by purchasing products
  * from Adafruit!
  *
- * Written by Brent Rubell for Adafruit Industries.
+ * Written by Brent Rubell for Adafruit Industries, 2026.
  *
  * MIT license, all text here must be included in any redistribution.
  */
@@ -51,6 +51,8 @@ public:
 private:
   mq_begin_status_t _begin_status;
   JsonDocument _cfg_doc;
+  bool initFilesystem();
+  void initUSBMSC();
   bool createEPD(const char *panel);
   bool parseThinkInkMode(const char* mode);
   Adafruit_EPD *_display; ///< Pointer to the EPD display object
@@ -67,10 +69,10 @@ private:
   // Adafruit IO
   const char* _aio_username; ///< Adafruit IO username
   const char* _aio_key; ///< Adafruit IO key
+  const char *_device_name; ///< Device name for Adafruit IO
   AdafruitIO_WiFi *_io; ///< Pointer to the Adafruit IO WiFi client
   AdafruitIO_Feed *_bmp; ///< Pointer to the Adafruit IO feed to subscribe to for bitmap data
   AdafruitIO_Feed *_sleep; ///< Pointer to the Adafruit IO feed to subscribe to for sleep info
-  AdafruitIO_Feed *_status; ///< Pointer to the Adafruit IO feed for the device publishing status info
 };
 
 #endif // ADAFRUIT_MARQUEE_H
