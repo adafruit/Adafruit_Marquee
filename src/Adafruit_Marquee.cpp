@@ -17,12 +17,8 @@
  */
 #include "Adafruit_Marquee.h"
 
-#include "Adafruit_TinyUSB.h"
-#include "SdFat_Adafruit_Fork.h"
 
-#include <functional>
-#include <map>
-#include <string>
+#include <base64.hpp>
 
 // for flashTransport definition
 #define ADAFRUIT_MARQUEE_INTERNAL
@@ -123,10 +119,35 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
 }
 
 /*!
+ * @brief Callback for bitmap feed messages.
+ * @param data The AdafruitIO_Data containing the message.
+ */
+void handleBitmapMsg(AdafruitIO_Data *data) {
+  Serial.print("received <- ");
+  Serial.println(data->value());
+}
+
+/*!
+ * @brief Callback for sleep feed messages.
+ * @param data The AdafruitIO_Data containing the message.
+ */
+void handleSleepMsg(AdafruitIO_Data *data) {
+  Serial.print("received <- ");
+  Serial.println(data->value());
+}
+
+/*!
  * @brief Creates a new instance of the Adafruit Marquee client.
  */
 Adafruit_Marquee::Adafruit_Marquee() {
   _display = nullptr;
+  _bmp = nullptr;
+  _sleep = nullptr;
+  _status = nullptr;
+  _ssid = nullptr;
+  _pass = nullptr;
+  _aio_username = nullptr;
+  _aio_key = nullptr;
   _pin_cs = -1;
   _pin_dc = -1;
   _pin_rst = -1;
@@ -225,6 +246,11 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   _pass = _cfg_doc["network"]["wifi_password"];
   _aio_username = _cfg_doc["adafruit_io"]["username"];
   _aio_key = _cfg_doc["adafruit_io"]["key"];
+  // Validate 
+  if (!_ssid || !_pass || !_aio_username || !_aio_key) {
+    _begin_status = ERR_JSON_DESERIALIZATION;
+    return _begin_status;
+  }
   _io = new AdafruitIO_WiFi(_aio_username, _aio_key, _ssid, _pass);
 
   _begin_status = SUCCESS;
@@ -249,7 +275,18 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
     }
     delay(500);
   }
+
+  _bmp->onMessage(handleBitmapMsg);
+  _sleep->onMessage(handleSleepMsg);
+
+  _bmp->get();
   return true;
+}
+
+void Adafruit_Marquee::run() {
+  if (!_io)
+    return;
+  _io->run();
 }
 
 

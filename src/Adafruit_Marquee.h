@@ -15,9 +15,13 @@
 #define ADAFRUIT_MARQUEE_H
 
 #include "Arduino.h"
+#include <functional>
+#include <map>
 #include <Adafruit_ThinkInk.h>
 #include <AdafruitIO_WiFi.h>
 #include <ArduinoJson.h>
+#include "Adafruit_TinyUSB.h"
+#include "SdFat_Adafruit_Fork.h"
 
 typedef enum {
   SUCCESS = 0,
@@ -27,6 +31,7 @@ typedef enum {
   ERR_TI_MODE_UNSUPPORTED = -4,
   ERR_IFACE_UNSUPPORTED = -5,
   ERR_EPD_PANEL_UNSUPPORTED = -6,
+  ERR_INVALID_CREDS = -7,
 } mq_begin_status_t; ///< Return codes for Adafruit_Marquee::begin()
 
 
@@ -39,6 +44,7 @@ public:
   ~Adafruit_Marquee();
   mq_begin_status_t begin();
   bool connect(unsigned long timeout = 30000);
+  void run();
 
   static bool fs_formatted;
   static volatile bool fs_changed;
@@ -62,6 +68,9 @@ private:
   const char* _aio_username; ///< Adafruit IO username
   const char* _aio_key; ///< Adafruit IO key
   AdafruitIO_WiFi *_io; ///< Pointer to the Adafruit IO WiFi client
+  AdafruitIO_Feed *_bmp; ///< Pointer to the Adafruit IO feed to subscribe to for bitmap data
+  AdafruitIO_Feed *_sleep; ///< Pointer to the Adafruit IO feed to subscribe to for sleep info
+  AdafruitIO_Feed *_status; ///< Pointer to the Adafruit IO feed for the device publishing status info
 };
 
 #endif // ADAFRUIT_MARQUEE_H
