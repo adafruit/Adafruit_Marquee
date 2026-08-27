@@ -72,33 +72,8 @@
   } while (0) ///< Disabled
 #endif
 
-/*!
-    @brief  Sanity ceiling on a decoded BMP. A 24bpp full-panel image is ~114KB;
-            past this the length is malformed, not an image we meant to draw.
-*/
-#define MQ_MAX_BMP_BYTES (128UL * 1024UL)
-/*!
-    @brief  base64 expansion of MIN_SZ_BMP_HEADER (54) bytes: ceil(54/3)*4.
-*/
-#define MQ_MIN_BMP_B64_LEN 72
-/*!
-    @brief  Payload buffer for the bitmap subscription, in bytes. Must hold a
-            whole MQTT PUBLISH payload: ~20,980 base64 chars for a 250x122 4bpp
-            BMP, plus headroom. MQ_MQTT_BUFFER_LEN below is derived from this.
-*/
-#define MQ_BITMAP_SUB_LEN 22528
-/*!
-    @brief  Packet buffer for the MQTT client, in bytes.
-
-    One buffer serves every incoming and outgoing packet, so it must hold the
-    largest of them: the bitmap PUBLISH. That is the payload plus
-    MQTT_PUBLISH_FRAMING_OVERHEAD (fixed header + remaining-length varint +
-    topic-length + packet id) plus the topic itself, so it has to be strictly
-    larger than MQ_BITMAP_SUB_LEN - sizing the two equally leaves a
-    maximum-length payload unable to fit through the buffer that carries it.
-    The 256 bytes of headroom cover any topic this library builds.
-*/
-#define MQ_MQTT_BUFFER_LEN (MQ_BITMAP_SUB_LEN + 256)
+#define MQ_BITMAP_SUB_LEN 81920 ///< Holds the payload for the bitmap subscription feed, in bytes (Sized for a 4.2" Tricolor ThinkInk panel)
+#define MQ_MQTT_BUFFER_LEN (MQ_BITMAP_SUB_LEN + 256) ///< Packet buffer for the MQTT client + 256 bytes of headroom for the topic, in bytes
 
 /*! @brief  Adafruit IO MQTT host. */
 #define MQ_IO_HOST "io.adafruit.us"
@@ -149,7 +124,7 @@ public:
   mq_begin_status_t begin();
   bool connect(unsigned long timeout = 30000);
   void run();
-  bool queueBitmapBase64(const char *b64, size_t b64_len);
+  bool decodeb64Bmp(const char *b64, size_t b64_len);
   static volatile bool fs_changed;
 
   // Network interface within networking/
@@ -200,7 +175,7 @@ protected:
   int16_t _width;    ///< Panel width in pixels, post-rotation
   int16_t _height;   ///< Panel height in pixels, post-rotation
   // Bitmap awaiting draw. Owned by this object, allocated in
-  // queueBitmapBase64() and freed in servicePendingDraw() or the destructor.
+  // decodeb64Bmp() and freed in servicePendingDraw() or the destructor.
   uint8_t *_pending_bmp; ///< Decoded BMP bytes, or nullptr
   size_t _pending_len;   ///< Byte length of _pending_bmp
   // Plain bool, not volatile: the MQTT callbacks are dispatched synchronously

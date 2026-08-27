@@ -149,7 +149,7 @@ void Adafruit_Marquee::cbBitmapMsg(char *data, uint16_t len) {
   Serial.flush();
   if (!_instance || !data || len == 0)
     return;
-  _instance->queueBitmapBase64(data, len);
+  _instance->decodeb64Bmp(data, len);
   MQ_TRACE("cbBitmapMsg: returned");
 }
 
@@ -733,57 +733,37 @@ bool Adafruit_Marquee::parseThinkInkMode(const char* mode) {
 }
 
 /*!
-    @brief  Validates and base64-decodes a BMP payload, queueing it to be drawn
-            on the next run().
-
-    Transport-agnostic: it takes any base64 string and does not care how that
-    string arrived. The length is passed in rather than derived with strlen()
-    so the payload is not walked an extra time; the caller already knows it
-    (for an MQTT subscription it is Adafruit_MQTT_Subscribe::datalen).
-
-    @param  b64      Base64-encoded BMP file. Must still be nul-terminated:
-                     decode_base64_length() reads input[0] before testing its
-                     bound, so it looks one byte past b64_len and relies on
-                     finding a non-base64 byte there.
-    @param  b64_len  Length of b64 in characters, excluding the terminator.
+    @brief  Decodes and saves a base64-encoded BMP, next run() draws it to the display.
+    @param  b64      Desired b64-encoded payload to decode.
+    @param  b64_len  Expected length of the payload.
     @return True if a bitmap was decoded and queued, False otherwise.
 */
-bool Adafruit_Marquee::queueBitmapBase64(const char *b64, size_t b64_len) {
-  if (!b64) {
-    MQ_DEBUG_PRINTLN("[bmp] ERROR: null payload");
+bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
+  if (!b64 || b64_len == 0) {
+    MQ_DEBUG_PRINTLN("[bmp] ERROR: null payload or zero length");
     return false;
   }
 
   MQ_TRACE("queueBitmap: enter");
   MQ_DEBUG_PRINTF("[trace] queueBitmap: len=%u\n", (unsigned)b64_len);
   Serial.flush();
-  if (b64_len < MQ_MIN_BMP_B64_LEN) {
-    MQ_DEBUG_PRINTF("[bmp] ERROR: payload too short: %u chars\n",
-                    (unsigned)b64_len);
-    return false;
-  }
-
-  // decode_base64_length() walks until the first non-base64 character, so '='
-  // padding and trailing whitespace both terminate it correctly. It reads
-  // input[0] before testing the bound, so it is only safe on a nul-terminated
-  // string - which is exactly the contract of this method.
-  size_t decoded_len =
-      decode_base64_length((const unsigned char *)b64, (unsigned int)b64_len);
-  if (decoded_len < MIN_SZ_BMP_HEADER || decoded_len > MQ_MAX_BMP_BYTES) {
+  // First, decode the payload's length without allocating a buffer
+  size_t decoded_len = decode_base64_length((const unsigned char *)b64, (unsigned int)b64_len);
+  if (decoded_len < MIN_SZ_BMP_HEADER || decoded_len > MQ_MQTT_BUFFER_LEN) {
     MQ_DEBUG_PRINTF("[bmp] ERROR: implausible decoded length: %u\n",
                     (unsigned)decoded_len);
     return false;
   }
-
-  // Prefer SPIRAM: the decoded file dwarfs anything worth taking out of the
-  // internal heap that the WiFi/TLS stack shares. Fall back for no-PSRAM parts.
   MQ_DEBUG_PRINTF("[trace] queueBitmap: decoded_len=%u, allocating\n",
                   (unsigned)decoded_len);
   Serial.flush();
+
+  // Then, attempt to allocate a buffer for the decoded BMP
   uint8_t *buf = (uint8_t *)ps_malloc(decoded_len);
   if (!buf) {
     buf = (uint8_t *)malloc(decoded_len);
   }
+  // Did allocation fail?
   if (!buf) {
     MQ_DEBUG_PRINTF("[bmp] ERROR: alloc of %u bytes failed\n",
                     (unsigned)decoded_len);
@@ -792,18 +772,17 @@ bool Adafruit_Marquee::queueBitmapBase64(const char *b64, size_t b64_len) {
 
   MQ_DEBUG_PRINTF("[trace] queueBitmap: buf=%p, decoding\n", buf);
   Serial.flush();
-  unsigned int written =
-      decode_base64((const unsigned char *)b64, (unsigned int)b64_len, buf);
+  // Attempt to decode the base64 payload into thebuffer
+  unsigned int write_len = decode_base64((const unsigned char *)b64, (unsigned int)b64_len, buf);
   MQ_TRACE("queueBitmap: decoded");
-  if (written != decoded_len) {
-    MQ_DEBUG_PRINTF("[bmp] ERROR: decoded %u of %u bytes\n", written,
+  if (write_len != decoded_len) {
+    MQ_DEBUG_PRINTF("[bmp] ERROR: decoded %u of %u bytes\n", write_len,
                     (unsigned)decoded_len);
     free(buf);
     return false;
   }
 
-  // Hand off to run(); do NOT draw here - see servicePendingDraw(). Newest
-  // frame wins: drop anything not yet drawn.
+  // Store and queue the decoded BMP for the next run() to draw
   if (_pending_bmp) {
     free(_pending_bmp);
   }
@@ -817,15 +796,10 @@ bool Adafruit_Marquee::queueBitmapBase64(const char *b64, size_t b64_len) {
 }
 
 /*!
-    @brief  Draws an assembled canvas to the display.
-    @param  bmp  Pointer to the complete BMP file bytes.
-    @param  len  Length of the BMP buffer, in bytes.
-    @return True if accepted, False otherwise.
-
-    Everything about BMP semantics - signature, bit depth, compression, palette,
-    row order, and bounding the pixel read against len - is validated by
-    Adafruit_ImageReader_EPD::coreBMP() and surfaced as the ImageReturnCode
-    logged below. Do not duplicate those checks here.
+    @brief  Attempts to draw a BMP to the display.
+    @param  bmp  Pointer to the buffer holding the BMP.
+    @param  len  Expected length of the BMP buffer, in bytes.
+    @return True if the image was drawn successfully, False otherwise.
 */
 bool Adafruit_Marquee::draw(const uint8_t *bmp, size_t len) {
   if (!_display)
@@ -834,11 +808,11 @@ bool Adafruit_Marquee::draw(const uint8_t *bmp, size_t len) {
     MQ_DEBUG_PRINTLN("[display] ERROR: Empty canvas buffer!");
     return false;
   }
-  MQ_TRACE("draw: enter");
+
   _display->clearBuffer();
-  MQ_TRACE("draw: buffer cleared");
 
   // Draw the BMP to the display
+  // TODO: Remove trace debug for production build
   uint32_t t_decode_start = millis();
   ImageReturnCode rc = _reader.drawBMP(bmp, len, *_display, 0, 0);
   MQ_TRACE("draw: drawBMP returned");
