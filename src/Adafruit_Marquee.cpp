@@ -141,13 +141,9 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
     @param  len   Payload length, in bytes.
 */
 void Adafruit_Marquee::cbBitmapMsg(char *data, uint16_t len) {
-  MQ_DEBUG_PRINTF("[trace] cbBitmapMsg: len=%u inst=%p data=%p\n",
-                  (unsigned)len, _instance, data);
-  Serial.flush();
   if (!_instance || !data || len == 0)
     return;
   _instance->decodeb64Bmp(data, len);
-  MQ_TRACE("cbBitmapMsg: returned");
 }
 
 /*!
@@ -228,13 +224,9 @@ Adafruit_Marquee::~Adafruit_Marquee() {
  */
 mq_begin_status_t Adafruit_Marquee::begin() {
 
-  MQ_TRACE("begin: enter");
-
   // Detach USB *before* touching the flash, mirroring Wippersnapper_FS
   TinyUSBDevice.detach();
   delay(500);
-
-  MQ_TRACE("begin: usb detached");
 
   // Attempt to init. the flash chip and the file system on it
   if (!initFilesystem()) {
@@ -244,12 +236,8 @@ mq_begin_status_t Adafruit_Marquee::begin() {
     return _begin_status;
   }
 
-  MQ_TRACE("begin: fs mounted");
-
   // Reattach FS
   initUSBMSC();
-
-  MQ_TRACE("begin: msc up");
 
   // Attempt to open and parse the marquee config file
   File32 cfg = fatfs.open("/cfg-marquee.json", O_RDONLY);
@@ -264,8 +252,6 @@ mq_begin_status_t Adafruit_Marquee::begin() {
     _begin_status = ERR_JSON_DESERIALIZATION;
     return _begin_status;
   }
-
-  MQ_TRACE("begin: cfg parsed");
 
   JsonObject display = _cfg_doc["display"];
   const char *display_panel = display["panel"];
@@ -293,14 +279,10 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   _pin_busy = pins["busy"] | -1;
   _pin_sram_cs = pins["sram_cs"] | -1;
 
-  MQ_TRACE("begin: pre-createEPD");
-
   if (!createEPD(display_panel)) {
     _begin_status = ERR_EPD_PANEL_UNSUPPORTED;
     return _begin_status;
   }
-
-  MQ_TRACE("begin: epd created");
 
   _display->setRotation(_rotation);
   _display->setTextSize(3);
@@ -314,8 +296,6 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   /*     if (!didBootFromSleep())
         _display->display(); */
 
-  MQ_TRACE("begin: display ready");
-
   // Parse network and Adafruit IO credentials
   _ssid = _cfg_doc["network"]["wifi_ssid"];
   _pass = _cfg_doc["network"]["wifi_password"];
@@ -328,7 +308,6 @@ mq_begin_status_t Adafruit_Marquee::begin() {
     return _begin_status;
   }
 
-  MQ_TRACE("begin: done");
   _begin_status = SUCCESS;
   return _begin_status;
 }
@@ -372,124 +351,81 @@ void Adafruit_Marquee::initUSBMSC() {
  * @returns True if initialization succeeded, False otherwise.
  */
 bool Adafruit_Marquee::initMqtt() {
-  // Publish ourselves to the static feed callbacks before subscribing, so a
-  // message arriving on the first processPackets() has somewhere to land.
   _instance = this;
 
-  MQ_TRACE("initMqtt: enter");
-
-  // Build the client here rather than in a constructor: Adafruit_MQTT keeps the
-  // credential pointers it is handed, and begin() only just filled them in.
+  // Attempt to create the MQTT client
   setupMQTTClient();
   if (!_mqtt) {
     MQ_DEBUG_PRINTLN("[mqtt] ERROR: could not create the MQTT client");
     return false;
   }
-
-  // Zero means the allocation failed. Nothing downstream is safe in that state
-  // - connect(), publish() and ping() all write through the buffer, and ping()
-  // takes no size argument to guard itself with - so stop here.
   if (_mqtt->bufferSize() == 0) {
     MQ_DEBUG_PRINTF("[mqtt] ERROR: could not allocate %u byte packet buffer\n",
                     (unsigned)MQ_MQTT_BUFFER_LEN);
     return false;
   }
-  // Before connect(): setKeepAliveInterval() refuses to change the value once
-  // the session is up, and Adafruit_MQTT::connect() is what writes it into the
-  // CONNECT packet.
+
   if (!_mqtt->setKeepAliveInterval(MQ_MQTT_KEEPALIVE_SEC)) {
     MQ_DEBUG_PRINTLN("[mqtt] ERROR: could not set the keepalive interval");
     return false;
   }
 
-  MQ_TRACE("initMqtt: client built");
-
   // Initialize Adafruit IO feed names
   snprintf(_feed_name_bmp, sizeof(_feed_name_bmp), "%s.bitmap", _device_name);
   snprintf(_topic_bmp, sizeof(_topic_bmp), "%s/f/%s/csv", _aio_username,
            _feed_name_bmp);
+  _sub_bmp = new Adafruit_MQTT_Subscribe(_mqtt, _topic_bmp, 0, MQ_BITMAP_SUB_LEN);
+  if (!_sub_bmp || !_sub_bmp->lastread) {
+    MQ_DEBUG_PRINTLN("[bmp] ERROR: Couldn't create the bitmap feed");
+    return false;
+  }
+  _sub_bmp->setCallback(cbBitmapMsg);
+
   snprintf(_feed_name_sleep, sizeof(_feed_name_sleep), "%s.sleep",
            _device_name);
   snprintf(_topic_sleep, sizeof(_topic_sleep), "%s/f/%s/csv", _aio_username,
            _feed_name_sleep);
-
-  // Only the bitmap subscription needs the large payload buffer; the sleep
-  // subscription takes the library default so it costs a few hundred bytes.
-  _sub_bmp =
-      new Adafruit_MQTT_Subscribe(_mqtt, _topic_bmp, 0, MQ_BITMAP_SUB_LEN);
   _sub_sleep = new Adafruit_MQTT_Subscribe(_mqtt, _topic_sleep);
-  if (!_sub_bmp || !_sub_sleep)
-    return false;
-  if (_sub_bmp->lastread == nullptr) {
-    MQ_DEBUG_PRINTF("[bmp] ERROR: could not allocate %d byte payload buffer\n",
-                    MQ_BITMAP_SUB_LEN);
+  if (!_sub_sleep) {
+    MQ_DEBUG_PRINTLN("[sleep] ERROR: could not create the sleep feed");
     return false;
   }
-
-  // Both sizes, out loud, at boot: the whole bitmap path depends on them and a
-  // failed allocation is otherwise silent until a payload truncates.
-  MQ_DEBUG_PRINTF("[bmp] sub payload buffer: %u bytes, packet buffer: %u\n",
-                  (unsigned)_sub_bmp->lastread_max,
-                  (unsigned)_mqtt->bufferSize());
-
-  MQ_TRACE("initMqtt: subs allocated");
-
-  _sub_bmp->setCallback(cbBitmapMsg);
   _sub_sleep->setCallback(cbSleepMsg);
 
-  // subscribe() only registers into the subscriptions[] array; the SUBSCRIBE
-  // packets are sent by Adafruit_MQTT::connect(), which runs after this. That
-  // also means they are re-sent on every reconnect, so nothing has to be
-  // re-registered when the link drops.
+  // Attempt to register subscriptions
   if (!_mqtt->subscribe(_sub_bmp) || !_mqtt->subscribe(_sub_sleep)) {
     MQ_DEBUG_PRINTLN("Failed to register MQTT subscriptions");
     return false;
   }
 
-  MQ_TRACE("initMqtt: subs registered");
-
-  MQ_DEBUG_PRINT("Subscribing to feed: ");
+  MQ_DEBUG_PRINT("Subscribed to BMP feed: ");
   MQ_DEBUG_PRINTLN(_topic_bmp);
-  MQ_DEBUG_PRINT("Subscribing to feed: ");
+  MQ_DEBUG_PRINT("Subscribed to sleep feed: ");
   MQ_DEBUG_PRINTLN(_topic_sleep);
   return true;
 }
 
 /*!
-    @brief  Associates with the configured WiFi network, blocking until it is
-            up or the timeout expires.
-    @param  timeout  Maximum time to wait for an association, in milliseconds.
-    @return True once the platform reports an association, else False.
+    @brief  Attempts to connect to the WiFi network
+    @param  timeout  Maximum time to wait for a connection, in milliseconds.
+    @return True once the platform reports an association, False otherwise
 */
 bool Adafruit_Marquee::initWifi(unsigned long timeout) {
   if (!_ssid || strlen(_ssid) == 0) {
-    MQ_DEBUG_PRINTLN("[wifi] ERROR: no SSID configured");
+    MQ_DEBUG_PRINTLN("[wifi] ERROR: SSID not found in config file!");
     return false;
   }
 
   MQ_DEBUG_PRINTF("[wifi] connecting to '%s'\n", _ssid);
-  Serial.flush();
   _connect();
+  delay(timeout);
   _last_wifi_attempt = millis();
-  MQ_TRACE("initWifi: post-begin");
 
-  // Settle before the first check, not after it. _connect() disconnects on
-  // the way in, and networkConnected() can still report the old association for
-  // a short window afterwards - polling it immediately would return success
-  // for a link that is actually down.
-  unsigned long start = millis();
-  for (;;) {
-    delay(250);
-    if (networkConnected())
-      break;
-    if (millis() - start >= timeout) {
-      MQ_DEBUG_PRINTF("[wifi] TIMEOUT after %lums, status=%d\n",
-                      millis() - start, networkStatus());
-      return false;
-    }
+  if (!networkConnected()) {
+    MQ_DEBUG_PRINTLN("[wifi] ERROR: timed out, could not connect to WiFi network");
+    return false;
   }
 
-  MQ_TRACE("initWifi: connected");
   return true;
 }
 
@@ -499,27 +435,16 @@ bool Adafruit_Marquee::initWifi(unsigned long timeout) {
     @return True on CONNACK success, else False.
 */
 bool Adafruit_Marquee::connectMqtt() {
-  MQ_TRACE("connectMqtt: enter");
   _last_mqtt_attempt = millis();
   int8_t rc = _mqtt->connect();
   if (rc == 0) {
-    // A previous rejection may have stretched the retry interval; a successful
-    // CONNACK means the credentials are fine, so put it back.
     _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
-    MQ_TRACE("connectMqtt: connected");
     return true;
   }
 
   MQ_DEBUG_PRINT("[mqtt] connect failed: ");
   MQ_DEBUG_PRINTLN(_mqtt->connectErrorString(rc));
-  // 1 wrong protocol, 2 client id rejected, 4 bad user/pass, 5 unauthorized.
-  // None of these start working on their own, so back off hard rather than
-  // hammering the broker every MQ_MQTT_RETRY_MS with the same rejected CONNECT.
-  if (rc == 1 || rc == 2 || rc == 4 || rc == 5) {
-    _mqtt_retry_ms = MQ_MQTT_FATAL_RETRY_MS;
-  } else {
-    _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
-  }
+  _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
   return false;
 }
 
@@ -529,12 +454,10 @@ bool Adafruit_Marquee::connectMqtt() {
  * @returns True if connection succeeded, otherwise false.
  */
 bool Adafruit_Marquee::connect(unsigned long timeout) {
-  MQ_TRACE("connect: enter");
   if (!initMqtt()) {
     MQ_DEBUG_PRINTLN("Failed to initialize the MQTT client and feeds");
     return false;
   }
-  MQ_TRACE("connect: initMqtt ok");
 
   if (!initWifi(timeout)) {
     return false;
@@ -561,27 +484,19 @@ void Adafruit_Marquee::drawBitmap() {
   if (!_pending_bmp || !_display)
     return;
 
-  MQ_DEBUG_PRINTF("[trace] drawBitmap: bmp=%p len=%u\n", _pending_bmp,
-                  (unsigned)_pending_len);
-  Serial.flush();
-
   _display->clearBuffer();
 
-  // TODO: Remove trace debug for production build
   uint32_t t_decode_start = millis();
   ImageReturnCode rc =
       _reader.drawBMP(_pending_bmp, _pending_len, *_display, 0, 0);
-  MQ_TRACE("drawBitmap: drawBMP returned");
   uint32_t t_decode = millis() - t_decode_start;
-  (void)t_decode; // only read by the debug trace below
+  (void)t_decode; // only read by the debug print below
 
   if (rc != IMAGE_SUCCESS) {
     MQ_DEBUG_PRINTF("[display] ERROR: drawBMP rc: %d\n", (int)rc);
   } else {
     uint32_t t_refresh_start = millis();
-    MQ_TRACE("drawBitmap: pre display()");
     _display->display();
-    MQ_TRACE("drawBitmap: post display()");
     (void)t_refresh_start;
     MQ_DEBUG_PRINTF("[display] decode ms: %u refresh ms: %u\n",
                     (unsigned)t_decode, (unsigned)(millis() - t_refresh_start));
@@ -601,7 +516,7 @@ void Adafruit_Marquee::handleConnection() {
     return;
   // Is the WiFi network still connected?
   if (!networkConnected()) {
-    if (millis() - _last_wifi_attempt >= 5000) {
+    if (millis() - _last_wifi_attempt >= MQ_WIFI_RETRY_MS) {
       MQ_DEBUG_PRINTLN("[wifi] disconnected, re-associating");
       _last_wifi_attempt = millis();
       _connect();
@@ -714,9 +629,6 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
     return false;
   }
 
-  MQ_TRACE("queueBitmap: enter");
-  MQ_DEBUG_PRINTF("[trace] queueBitmap: len=%u\n", (unsigned)b64_len);
-  Serial.flush();
   // First, decode the payload's length without allocating a buffer
   size_t decoded_len =
       decode_base64_length((const unsigned char *)b64, (unsigned int)b64_len);
@@ -725,9 +637,6 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
                     (unsigned)decoded_len);
     return false;
   }
-  MQ_DEBUG_PRINTF("[trace] queueBitmap: decoded_len=%u, allocating\n",
-                  (unsigned)decoded_len);
-  Serial.flush();
 
   // Then, attempt to allocate a buffer for the decoded BMP
   uint8_t *buf = (uint8_t *)ps_malloc(decoded_len);
@@ -741,12 +650,9 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
     return false;
   }
 
-  MQ_DEBUG_PRINTF("[trace] queueBitmap: buf=%p, decoding\n", buf);
-  Serial.flush();
   // Attempt to decode the base64 payload into thebuffer
   unsigned int write_len =
       decode_base64((const unsigned char *)b64, (unsigned int)b64_len, buf);
-  MQ_TRACE("queueBitmap: decoded");
   if (write_len != decoded_len) {
     MQ_DEBUG_PRINTF("[bmp] ERROR: decoded %u of %u bytes\n", write_len,
                     (unsigned)decoded_len);

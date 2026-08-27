@@ -28,9 +28,6 @@ public:
       @brief  Initializes the Marquee client for ESP32.
   */
   Adafruit_Marquee_ESP32() : Adafruit_Marquee() {
-    // The socket and its trust anchor depend on nothing the config file
-    // carries, so they can be set up here. The MQTT client cannot: see
-    // setupMQTTClient().
     _mqtt_client_secure = new WiFiClientSecure;
     if (_mqtt_client_secure)
       _mqtt_client_secure->setCACert(_aio_root_ca);
@@ -80,8 +77,6 @@ protected:
       @brief  Attempts to connect to the wireless network.
   */
   void _connect() {
-    // Selecting the mode starts the WiFi driver, so it is done once rather
-    // than on every reconnect - the call is idempotent but not free.
     if (!_mode_set) {
       WiFi.mode(WIFI_STA);
       _mode_set = true;

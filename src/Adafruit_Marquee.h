@@ -25,18 +25,13 @@
 #include <functional>
 #include <map>
 
-#define MAX_IO_FEED_NAME_LEN 128
-
-/*!
-    @brief  Serial tracing. Build with -DMARQUEE_DEBUG=0 to compile it out.
-*/
 #ifndef MARQUEE_DEBUG
 #define MARQUEE_DEBUG 1
 #endif
 #if MARQUEE_DEBUG
-#define MQ_DEBUG_PRINT(...) Serial.print(__VA_ARGS__)     ///< Trace, no newline
-#define MQ_DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__) ///< Trace + newline
-#define MQ_DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)   ///< Formatted trace
+#define MQ_DEBUG_PRINT(...) Serial.print(__VA_ARGS__)     ///< Debug, no newline
+#define MQ_DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__) ///< Debug + newline
+#define MQ_DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)   ///< Formatted debug
 #else
 #define MQ_DEBUG_PRINT(...)                                                    \
   do {                                                                         \
@@ -49,29 +44,8 @@
   } while (0) ///< Disabled
 #endif
 
-/*!
-    @brief  Bring-up step trace.
-
-    Prints the step and flushes. This exists because the ESP32-S2 has no
-    USB-Serial-JTAG peripheral: its USB is OTG driven in software by TinyUSB,
-    the IDF console is UART0 (CONFIG_ESP_CONSOLE_UART_NUM=0), and the panic
-    handler runs with interrupts off - so a backtrace goes out GPIO43 and never
-    reaches the USB CDC port. With PANIC_PRINT_REBOOT and a 0s delay, the last
-    step that made it out over USB is the only evidence of where execution
-    stopped.
-*/
-#if MARQUEE_DEBUG
-#define MQ_TRACE(step)                                                         \
-  do {                                                                         \
-    Serial.printf("[trace] %s\n", (step));                                     \
-    Serial.flush();                                                            \
-  } while (0)
-#else
-#define MQ_TRACE(step)                                                         \
-  do {                                                                         \
-  } while (0) ///< Disabled
-#endif
-
+#define MAX_IO_FEED_NAME_LEN                                                   \
+  128 ///< Maximum length of an Adafruit IO feed name, in bytes
 #define MQ_BITMAP_SUB_LEN                                                      \
   81920 ///< Holds the payload for the bitmap subscription feed, in bytes (Sized
         ///< for a 4.2" Tricolor ThinkInk panel)
@@ -79,28 +53,14 @@
   (MQ_BITMAP_SUB_LEN + 256) ///< Packet buffer for the MQTT client + 256 bytes
                             ///< of headroom for the topic, in bytes
 
-/*! @brief  Adafruit IO MQTT host. */
-#define MQ_IO_HOST "io.adafruit.us"
-/*! @brief  Adafruit IO MQTT port, TLS. */
-#define MQ_IO_MQTT_PORT 8883
+#define MQ_IO_HOST "io.adafruit.us" ///< Adafruit IO staging server
+#define MQ_IO_MQTT_PORT 8883        ///< Adafruit IO MQTT server port
 
-/*!
-    @brief  Keepalive the client asks for in CONNECT, in seconds. Overrides the
-            library's 300s MQTT_CONN_KEEPALIVE default: shorter means the broker
-            notices a dead link sooner, and Adafruit IO caps how long a client
-            may ask for anyway.
-*/
-#define MQ_MQTT_KEEPALIVE_SEC 180
-/*! @brief  Minimum wait between WiFi association attempts, in milliseconds. */
-#define MQ_WIFI_RETRY_MS 5000
-/*! @brief  Minimum wait between MQTT connect attempts, in milliseconds. */
-#define MQ_MQTT_RETRY_MS 10000
-/*!
-    @brief  Wait after a CONNACK that rejected us on protocol or credentials,
-            in milliseconds. Retrying those at MQ_MQTT_RETRY_MS just hammers
-            the broker with a request that cannot start succeeding on its own.
-*/
-#define MQ_MQTT_FATAL_RETRY_MS 60000
+#define MQ_MQTT_KEEPALIVE_SEC 180 ///< Keepalive, in seconds
+#define MQ_WIFI_RETRY_MS                                                       \
+  5000 ///< Minimum wait between WiFi association attempts, in milliseconds.
+#define MQ_MQTT_RETRY_MS                                                       \
+  10000 ///< Minimum wait between MQTT connect attempts, in milliseconds.
 
 typedef enum {
   SUCCESS = 0,
@@ -198,10 +158,8 @@ protected:
   char _feed_name_sleep[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the sleep feed
   char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];  ///< <user>/f/<feed>/csv
   char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>/csv
-  static void cbBitmapMsg(char *data,
-                          uint16_t len); ///< Callback for bitmap feed messages
-  static void cbSleepMsg(char *data,
-                         uint16_t len); ///< Callback for sleep feed messages
+  static void cbBitmapMsg(char *data, uint16_t len);
+  static void cbSleepMsg(char *data, uint16_t len);
 
   // Network interface within networking/
   virtual void _connect() = 0;
