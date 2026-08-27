@@ -14,16 +14,16 @@
 #ifndef ADAFRUIT_MARQUEE_H
 #define ADAFRUIT_MARQUEE_H
 
+#include "Adafruit_ImageReader_EPD.h"
+#include "Adafruit_TinyUSB.h"
 #include "Arduino.h"
-#include <functional>
-#include <map>
-#include <Adafruit_ThinkInk.h>
+#include "SdFat_Adafruit_Fork.h"
 #include <Adafruit_MQTT.h>
 #include <Adafruit_MQTT_Client.h>
+#include <Adafruit_ThinkInk.h>
 #include <ArduinoJson.h>
-#include "Adafruit_TinyUSB.h"
-#include "SdFat_Adafruit_Fork.h"
-#include "Adafruit_ImageReader_EPD.h"
+#include <functional>
+#include <map>
 
 #define MAX_IO_FEED_NAME_LEN 128
 
@@ -72,8 +72,12 @@
   } while (0) ///< Disabled
 #endif
 
-#define MQ_BITMAP_SUB_LEN 81920 ///< Holds the payload for the bitmap subscription feed, in bytes (Sized for a 4.2" Tricolor ThinkInk panel)
-#define MQ_MQTT_BUFFER_LEN (MQ_BITMAP_SUB_LEN + 256) ///< Packet buffer for the MQTT client + 256 bytes of headroom for the topic, in bytes
+#define MQ_BITMAP_SUB_LEN                                                      \
+  81920 ///< Holds the payload for the bitmap subscription feed, in bytes (Sized
+        ///< for a 4.2" Tricolor ThinkInk panel)
+#define MQ_MQTT_BUFFER_LEN                                                     \
+  (MQ_BITMAP_SUB_LEN + 256) ///< Packet buffer for the MQTT client + 256 bytes
+                            ///< of headroom for the topic, in bytes
 
 /*! @brief  Adafruit IO MQTT host. */
 #define MQ_IO_HOST "io.adafruit.us"
@@ -81,16 +85,12 @@
 #define MQ_IO_MQTT_PORT 8883
 
 /*!
-    @brief  How long processPackets() spends waiting on the socket per run(),
-            in milliseconds. Short enough that run() stays responsive for the
-            EPD draw path; the value Adafruit IO's client used by default.
+    @brief  Keepalive the client asks for in CONNECT, in seconds. Overrides the
+            library's 300s MQTT_CONN_KEEPALIVE default: shorter means the broker
+            notices a dead link sooner, and Adafruit IO caps how long a client
+            may ask for anyway.
 */
-#define MQ_PACKET_READ_MS 100
-/*!
-    @brief  PINGREQ interval, in milliseconds. Well inside the 300s
-            MQTT_CONN_KEEPALIVE the client negotiates.
-*/
-#define MQ_PING_INTERVAL_MS 60000
+#define MQ_MQTT_KEEPALIVE_SEC 180
 /*! @brief  Minimum wait between WiFi association attempts, in milliseconds. */
 #define MQ_WIFI_RETRY_MS 5000
 /*! @brief  Minimum wait between MQTT connect attempts, in milliseconds. */
@@ -113,7 +113,6 @@ typedef enum {
   ERR_INVALID_CREDS = -7,
 } mq_begin_status_t; ///< Return codes for Adafruit_Marquee::begin()
 
-
 /*!
  * @brief Client for the Adafruit IO Marquee feature.
  */
@@ -124,92 +123,85 @@ public:
   mq_begin_status_t begin();
   bool connect(unsigned long timeout = 30000);
   void run();
-  bool decodeb64Bmp(const char *b64, size_t b64_len);
-  static volatile bool fs_changed;
 
-  // Network interface within networking/
-  virtual bool networkConnected() = 0;
-  virtual int networkStatus() = 0;
-  virtual const char *connectionType() = 0;
-  /*!
-      @brief  Builds _mqtt over the platform's secure socket.
+  // Platform-specific networking interface
+  virtual bool
+  networkConnected() = 0;          ///< Returns true if the network interface is
+                                   ///< connected to a network, False otherwise
+  virtual int networkStatus() = 0; ///< Returns a platform-specific status code
+                                   ///< for the network interface
+  virtual const char *
+  connectionType() = 0; ///< Returns a string describing the network interface
+                        ///< type (e.g. "WiFi", "Ethernet", "BLE")
+  virtual void
+  setupMQTTClient() = 0; ///< Configures the platform adapter's MQTT client
 
-      Called by initMQTT(), after begin() has parsed the config - never from a
-      constructor. Adafruit_MQTT stores the credential pointers it is handed
-              rather than copying them, and they are null until begin() runs.
-      Must leave _mqtt non-null on success.
-  */
-  virtual void setupMQTTClient() = 0;
+  static volatile bool fs_changed; ///< True when the filesystem is changed by
+                                   ///< the host over USB MSC, False otherwise
 protected:
+  static Adafruit_Marquee *_instance; ///< Pointer to the instance that the MQTT
+                                      ///< callbacks dispatch to
   static bool fs_formatted;
   mq_begin_status_t _begin_status;
   JsonDocument _cfg_doc;
+  // USB MSC and Filesystem API
   bool initFilesystem();
   void initUSBMSC();
-  bool initMQTT();
-  bool connectWiFi(unsigned long timeout);
-  bool connectMQTT();
-  void maintainConnection();
-  void requestBitmap();
+
+  // Networking API
+  bool initWifi(unsigned long timeout);
+  bool connectMqtt();
+  bool initMqtt();
+  void handleConnection();
+
+  // ThinkInk panel API
   bool createEPD(const char *panel);
-  bool parseThinkInkMode(const char* mode);
-  bool draw(const uint8_t *bmp, size_t len);
-  void servicePendingDraw();
-  static void cbBitmapMsg(char *data, uint16_t len);
-  static void cbSleepMsg(char *data, uint16_t len);
-  /*!
-      @brief  The instance the MQTT callbacks dispatch to. Adafruit_MQTT takes
-              plain function pointers, so the callbacks are static members that
-              trampoline through this. Set by initMQTT().
-  */
-  static Adafruit_Marquee *_instance;
-  Adafruit_EPD *_display; ///< Pointer to the EPD display object
+  bool parseThinkInkMode(const char *mode);
+  bool decodeb64Bmp(const char *b64, size_t b64_len);
+  void drawBitmap();
   Adafruit_ImageReader_EPD _reader; ///< In-memory BMP decoder for the EPD
-  thinkinkmode_t _thinkInkMode; ///< ThinkInk mode for the display
-  int16_t _pin_cs; ///< Chip select pin for EPD
-  int16_t _pin_dc; ///< Data/Command pin for EPD
-  int16_t _pin_rst; ///< Reset pin for EPD
-  int16_t _pin_busy; ///< Busy pin for EPD
-  int16_t _pin_sram_cs; ///< SRAM chip select pin for EPD
-  uint8_t _rotation; ///< Display rotation (0-3)
-  int16_t _width;    ///< Panel width in pixels, post-rotation
-  int16_t _height;   ///< Panel height in pixels, post-rotation
-  // Bitmap awaiting draw. Owned by this object, allocated in
-  // decodeb64Bmp() and freed in servicePendingDraw() or the destructor.
-  uint8_t *_pending_bmp; ///< Decoded BMP bytes, or nullptr
-  size_t _pending_len;   ///< Byte length of _pending_bmp
-  // Plain bool, not volatile: the MQTT callbacks are dispatched synchronously
-  // on the calling task from inside processPackets(), not from an ISR.
-  bool _pending_draw; ///< Set by cbBitmapMsg(), cleared by servicePendingDraw()
+  Adafruit_EPD *_display;           ///< Pointer to the EPD display object
+  thinkinkmode_t _thinkInkMode;     ///< ThinkInk mode for the display
+  int16_t _pin_cs;                  ///< Chip select pin for EPD
+  int16_t _pin_dc;                  ///< Data/Command pin for EPD
+  int16_t _pin_rst;                 ///< Reset pin for EPD
+  int16_t _pin_busy;                ///< Busy pin for EPD
+  int16_t _pin_sram_cs;             ///< SRAM chip select pin for EPD
+  uint8_t _rotation;                ///< Display rotation (0-3)
+  int16_t _width;                   ///< Panel width in pixels, post-rotation
+  int16_t _height;                  ///< Panel height in pixels, post-rotation
+  uint8_t *_pending_bmp;            ///< Decoded BMP bytes, or nullptr
+  size_t _pending_len;              ///< Byte length of _pending_bmp
+
   // Networking
-  const char* _ssid; ///< WiFi SSID
-  const char* _pass; ///< WiFi password
+  const char *_ssid; ///< WiFi SSID
+  const char *_pass; ///< WiFi password
+
   // Adafruit IO
-  const char* _aio_username; ///< Adafruit IO username
-  const char* _aio_key; ///< Adafruit IO key
-  const char *_device_name; ///< Device name for Adafruit IO
+  const char *_aio_username; ///< Adafruit IO username
+  const char *_aio_key;      ///< Adafruit IO key
+  const char *_device_name;  ///< Device name for Adafruit IO
+
+  // Adafruit_MQTT
   Adafruit_MQTT_Client *_mqtt; ///< MQTT client, owns the packet buffer
-  unsigned long _last_ping;         ///< millis() of the last PINGREQ
-  unsigned long _last_wifi_attempt; ///< millis() of the last attempt
-  unsigned long _last_mqtt_attempt; ///< millis() of the last MQTT connect()
-  /*!
-      @brief  How long maintainConnection() waits before retrying MQTT. Bumped
-              to MQ_MQTT_FATAL_RETRY_MS by a CONNACK that rejected the protocol
-              level or the credentials.
-  */
-  unsigned long _mqtt_retry_ms;
-  // Both feeds are plain MQTT topics rather than an Adafruit IO feed wrapper:
-  // that wrapper copies the payload into a 45-byte value buffer, which a
-  // bitmap would overrun, and routing the sleep feed the same way keeps one
-  // code path.
-  Adafruit_MQTT_Subscribe *_sub_bmp;   ///< Subscription for the bitmap topic
+  unsigned long _last_ping; ///< The last time a PINGREQ was sent to the broker,
+                            ///< in millis()
+  unsigned long _last_wifi_attempt;  ///< The last time a WiFi association was
+                                     ///< attempted, in millis()
+  unsigned long _last_mqtt_attempt;  ///< The last time an MQTT connection was
+                                     ///< attempted, in millis()
+  unsigned long _mqtt_retry_ms;      ///< How long to wait before retrying MQTT
+                                     ///< connection, in milliseconds
+  Adafruit_MQTT_Subscribe *_sub_bmp; ///< Subscription for the bitmap topic
   Adafruit_MQTT_Subscribe *_sub_sleep; ///< Subscription for the sleep topic
   char _feed_name_bmp[MAX_IO_FEED_NAME_LEN];   ///< Feed key for the bitmap feed
   char _feed_name_sleep[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the sleep feed
-  // The bitmap /get topic is not kept: requestBitmap() builds it from
-  // _feed_name_bmp on demand, since it is only needed once per (re)connect.
-  char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];   ///< <user>/f/<feed>/csv
+  char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];  ///< <user>/f/<feed>/csv
   char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>/csv
+  static void cbBitmapMsg(char *data,
+                          uint16_t len); ///< Callback for bitmap feed messages
+  static void cbSleepMsg(char *data,
+                         uint16_t len); ///< Callback for sleep feed messages
 
   // Network interface within networking/
   virtual void _connect() = 0;
