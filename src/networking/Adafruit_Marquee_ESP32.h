@@ -1,10 +1,7 @@
 /*!
  * @file Adafruit_Marquee_ESP32.h
  *
- * Network interface for the ESP32
- *
- * Resolved by Adafruit_Marquee_WiFi.h on ARDUINO_ARCH_ESP32; a sketch declares
- * an Adafruit_Marquee_WiFi and never names this class directly.
+ * Network adapter for the ESP32
  *
  * MIT license, all text here must be included in any redistribution.
  */
@@ -21,75 +18,67 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 
-/****************************************************************************/
 /*!
-    @brief  Class for using the ESP32 network interface.
+    @brief  Class for using the ESP32 network adapter.
 */
-/****************************************************************************/
 class Adafruit_Marquee_ESP32 : public Adafruit_Marquee {
 
 public:
-  /**************************************************************************/
   /*!
       @brief  Initializes the Marquee client for ESP32.
   */
-  /**************************************************************************/
   Adafruit_Marquee_ESP32() : Adafruit_Marquee() {
-    if (!_mqtt_client_secure)
-      _mqtt_client_secure = new WiFiClientSecure;
-
-    // Set the root CA and create the MQTT client
-    _mqtt_client_secure->setCACert(_aio_root_ca);
-    _mqtt = new Adafruit_MQTT_Client(_mqtt_client_secure, MQ_IO_HOST,
-                                     MQ_IO_MQTT_PORT, "", _aio_username,
-                                     _aio_key, MQ_MQTT_BUFFER_LEN);
+    // The socket and its trust anchor depend on nothing the config file
+    // carries, so they can be set up here. The MQTT client cannot: see
+    // setupMQTTClient().
+    _mqtt_client_secure = new WiFiClientSecure;
+    if (_mqtt_client_secure)
+      _mqtt_client_secure->setCACert(_aio_root_ca);
   }
 
-  /**************************************************************************/
   /*!
       @brief  Destructor.
   */
-  /**************************************************************************/
   ~Adafruit_Marquee_ESP32() {
     if (_mqtt_client_secure)
       delete _mqtt_client_secure;
   }
 
-  /**************************************************************************/
   /*!
       @brief  Whether the station holds an association.
       @return True if associated, else False.
   */
-  /**************************************************************************/
   bool networkConnected() { return WiFi.status() == WL_CONNECTED; }
 
-  /**************************************************************************/
   /*!
       @brief  Returns the network status of an ESP32 module.
       @return The platform's status enum, as an int.
   */
-  /**************************************************************************/
   int networkStatus() { return (int)WiFi.status(); }
 
-  /**************************************************************************/
   /*!
       @brief  Returns the type of network connection used by Marquee.
       @return "wifi"
   */
-  /**************************************************************************/
   const char *connectionType() { return "wifi"; }
 
-protected:
-  /**************************************************************************/
-  /*!
-      @brief  Establishes a connection with the wireless network.
 
-      Always disconnects on the way in: a link left over from a previous boot
-      or a half-finished attempt makes networkConnected() report a stale value.
-      Does not block - the reconnect caller runs in a non-blocking loop, so how
-      long to settle before trusting networkConnected() is its policy.
+  /*!
+      @brief  Constructs the secure MQTT client
   */
-  /**************************************************************************/
+  void setupMQTTClient() {
+    if (!_mqtt_client_secure)
+      return;
+
+    _mqtt = new Adafruit_MQTT_Client(_mqtt_client_secure, MQ_IO_HOST,
+                                     MQ_IO_MQTT_PORT, "", _aio_username,
+                                     _aio_key, MQ_MQTT_BUFFER_LEN);
+  }
+
+protected:
+  /*!
+      @brief  Attempts to connect to the wireless network.
+  */
   void _connect() {
     // Selecting the mode starts the WiFi driver, so it is done once rather
     // than on every reconnect - the call is idempotent but not free.
@@ -101,15 +90,13 @@ protected:
     WiFi.begin(_ssid, _pass);
   }
 
-  /**************************************************************************/
   /*!
       @brief  Disconnects from the wireless network.
   */
-  /**************************************************************************/
   void _disconnect() { WiFi.disconnect(); }
 
-  WiFiClientSecure *_mqtt_client_secure; ///< Secure socket the MQTT client uses
-  bool _mode_set = false;                ///< Whether WIFI_STA has been selected
+  WiFiClientSecure *_mqtt_client_secure = nullptr; ///< Instance of secure WiFiClient
+  bool _mode_set = false; ///< Whether WIFI_STA has been already selected
 
   const char *_aio_root_ca =
       "-----BEGIN CERTIFICATE-----\n"

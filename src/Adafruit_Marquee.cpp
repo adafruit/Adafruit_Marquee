@@ -16,8 +16,6 @@
  * MIT license, all text here must be included in any redistribution.
  */
 #include "Adafruit_Marquee.h"
-
-
 #include <base64.hpp>
 
 // for flashTransport definition
@@ -72,10 +70,8 @@ static int32_t msc_write_cb (uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
 static void msc_flush_cb (void) {
   // sync with flash
   flash.syncBlocks();
-
   // clear file system's cache to force refresh
   fatfs.cacheClear();
-
   Adafruit_Marquee::fs_changed = true;
 }
 
@@ -153,7 +149,7 @@ void Adafruit_Marquee::cbBitmapMsg(char *data, uint16_t len) {
   Serial.flush();
   if (!_instance || !data || len == 0)
     return;
-  _instance->queueBitmapBase64(data);
+  _instance->queueBitmapBase64(data, len);
   MQ_TRACE("cbBitmapMsg: returned");
 }
 
@@ -181,7 +177,6 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
   _sub_bmp = nullptr;
   _sub_sleep = nullptr;
-  _pub_bmp_get = nullptr;
   _pending_bmp = nullptr;
   _pending_len = 0;
   _pending_draw = false;
@@ -222,8 +217,6 @@ Adafruit_Marquee::~Adafruit_Marquee() {
   _sub_bmp = nullptr;
   delete _sub_sleep;
   _sub_sleep = nullptr;
-  delete _pub_bmp_get;
-  _pub_bmp_get = nullptr;
   // Order matters: the subscriptions above hold a back-pointer to the client,
   // and the client writes through the socket.
   delete _mqtt;
@@ -390,6 +383,15 @@ bool Adafruit_Marquee::initMQTT() {
   _instance = this;
 
   MQ_TRACE("initMQTT: enter");
+
+  // Build the client here rather than in a constructor: Adafruit_MQTT keeps the
+  // credential pointers it is handed, and begin() only just filled them in.
+  setupMQTTClient();
+  if (!_mqtt) {
+    MQ_DEBUG_PRINTLN("[mqtt] ERROR: could not create the MQTT client");
+    return false;
+  }
+
   // Zero means the allocation failed. Nothing downstream is safe in that state
   // - connect(), publish() and ping() all write through the buffer, and ping()
   // takes no size argument to guard itself with - so stop here.
@@ -400,18 +402,12 @@ bool Adafruit_Marquee::initMQTT() {
   }
   MQ_TRACE("initMQTT: client built");
 
+  // Initialize Adafruit IO feed names
   snprintf(_feed_name_bmp, sizeof(_feed_name_bmp), "%s.bitmap", _device_name);
-  snprintf(_feed_name_sleep, sizeof(_feed_name_sleep), "%s.sleep",
-           _device_name);
-
-  // The feeds are plain MQTT topics on purpose. Adafruit IO's own feed wrapper
-  // routes a payload through a 45-byte value buffer filled by an unbounded
-  // strcpy, so a bitmap would both truncate and overrun; a raw subscription
-  // hands us its own buffer, sized below.
   snprintf(_topic_bmp, sizeof(_topic_bmp), "%s/f/%s/csv", _aio_username,
            _feed_name_bmp);
-  snprintf(_topic_bmp_get, sizeof(_topic_bmp_get), "%s/f/%s/csv/get",
-           _aio_username, _feed_name_bmp);
+  snprintf(_feed_name_sleep, sizeof(_feed_name_sleep), "%s.sleep",
+           _device_name);
   snprintf(_topic_sleep, sizeof(_topic_sleep), "%s/f/%s/csv", _aio_username,
            _feed_name_sleep);
 
@@ -420,8 +416,7 @@ bool Adafruit_Marquee::initMQTT() {
   _sub_bmp =
       new Adafruit_MQTT_Subscribe(_mqtt, _topic_bmp, 0, MQ_BITMAP_SUB_LEN);
   _sub_sleep = new Adafruit_MQTT_Subscribe(_mqtt, _topic_sleep);
-  _pub_bmp_get = new Adafruit_MQTT_Publish(_mqtt, _topic_bmp_get);
-  if (!_sub_bmp || !_sub_sleep || !_pub_bmp_get)
+  if (!_sub_bmp || !_sub_sleep)
     return false;
   if (_sub_bmp->lastread == nullptr) {
     MQ_DEBUG_PRINTF("[bmp] ERROR: could not allocate %d byte payload buffer\n",
@@ -533,12 +528,24 @@ bool Adafruit_Marquee::connectMQTT() {
     value" convention. Note Adafruit_MQTT_Publish has no (const char *, length)
     overload - passing a length here would bind to publish(const char *, bool
     retain) and publish a *retained* empty message to the feed instead.
+
+    The topic and the publisher are both built here rather than kept as
+    members. Adafruit_MQTT_Publish only holds the client, a topic pointer and
+    the QoS, and publish() uses the topic immediately - so there is nothing to
+    keep alive between calls, and the /get topic does not need a second copy of
+    what _feed_name_bmp already carries. This runs once per (re)connect.
 */
 void Adafruit_Marquee::requestBitmap() {
-  if (!_pub_bmp_get)
+  if (!_mqtt || !_aio_username)
     return;
+
+  char topic[sizeof(_topic_bmp)];
+  snprintf(topic, sizeof(topic), "%s/f/%s/csv/get", _aio_username,
+           _feed_name_bmp);
+
+  Adafruit_MQTT_Publish pub_get(_mqtt, topic);
   MQ_TRACE("requestBitmap: pre publish");
-  _pub_bmp_get->publish("\0");
+  pub_get.publish("\0");
   MQ_TRACE("requestBitmap: post publish");
 }
 
@@ -729,21 +736,26 @@ bool Adafruit_Marquee::parseThinkInkMode(const char* mode) {
     @brief  Validates and base64-decodes a BMP payload, queueing it to be drawn
             on the next run().
 
-    Transport-agnostic: it takes any nul-terminated base64 string and does not
-    care how that string arrived.
+    Transport-agnostic: it takes any base64 string and does not care how that
+    string arrived. The length is passed in rather than derived with strlen()
+    so the payload is not walked an extra time; the caller already knows it
+    (for an MQTT subscription it is Adafruit_MQTT_Subscribe::datalen).
 
-    @param  b64  Nul-terminated base64-encoded BMP file.
+    @param  b64      Base64-encoded BMP file. Must still be nul-terminated:
+                     decode_base64_length() reads input[0] before testing its
+                     bound, so it looks one byte past b64_len and relies on
+                     finding a non-base64 byte there.
+    @param  b64_len  Length of b64 in characters, excluding the terminator.
     @return True if a bitmap was decoded and queued, False otherwise.
 */
-bool Adafruit_Marquee::queueBitmapBase64(const char *b64) {
+bool Adafruit_Marquee::queueBitmapBase64(const char *b64, size_t b64_len) {
   if (!b64) {
     MQ_DEBUG_PRINTLN("[bmp] ERROR: null payload");
     return false;
   }
 
   MQ_TRACE("queueBitmap: enter");
-  size_t b64_len = strlen(b64);
-  MQ_DEBUG_PRINTF("[trace] queueBitmap: strlen=%u\n", (unsigned)b64_len);
+  MQ_DEBUG_PRINTF("[trace] queueBitmap: len=%u\n", (unsigned)b64_len);
   Serial.flush();
   if (b64_len < MQ_MIN_BMP_B64_LEN) {
     MQ_DEBUG_PRINTF("[bmp] ERROR: payload too short: %u chars\n",

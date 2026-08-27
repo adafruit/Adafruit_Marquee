@@ -149,13 +149,22 @@ public:
   mq_begin_status_t begin();
   bool connect(unsigned long timeout = 30000);
   void run();
-  bool queueBitmapBase64(const char *b64);
+  bool queueBitmapBase64(const char *b64, size_t b64_len);
   static volatile bool fs_changed;
 
   // Network interface within networking/
   virtual bool networkConnected() = 0;
   virtual int networkStatus() = 0;
   virtual const char *connectionType() = 0;
+  /*!
+      @brief  Builds _mqtt over the platform's secure socket.
+
+      Called by initMQTT(), after begin() has parsed the config - never from a
+      constructor. Adafruit_MQTT stores the credential pointers it is handed
+              rather than copying them, and they are null until begin() runs.
+      Must leave _mqtt non-null on success.
+  */
+  virtual void setupMQTTClient() = 0;
 protected:
   static bool fs_formatted;
   mq_begin_status_t _begin_status;
@@ -220,12 +229,12 @@ protected:
   // code path.
   Adafruit_MQTT_Subscribe *_sub_bmp;   ///< Subscription for the bitmap topic
   Adafruit_MQTT_Subscribe *_sub_sleep; ///< Subscription for the sleep topic
-  Adafruit_MQTT_Publish *_pub_bmp_get; ///< Publishes to the bitmap /get topic
   char _feed_name_bmp[MAX_IO_FEED_NAME_LEN];   ///< Feed key for the bitmap feed
   char _feed_name_sleep[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the sleep feed
-  char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];     ///< <user>/f/<feed>/csv
-  char _topic_bmp_get[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>/csv/get
-  char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96];   ///< <user>/f/<feed>/csv
+  // The bitmap /get topic is not kept: requestBitmap() builds it from
+  // _feed_name_bmp on demand, since it is only needed once per (re)connect.
+  char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];   ///< <user>/f/<feed>/csv
+  char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>/csv
 
   // Network interface within networking/
   virtual void _connect() = 0;
