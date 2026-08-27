@@ -22,7 +22,6 @@
     @brief  Class for using the ESP32 network adapter.
 */
 class Adafruit_Marquee_ESP32 : public Adafruit_Marquee {
-
 public:
   /*!
       @brief  Initializes the Marquee client for ESP32.

@@ -147,7 +147,7 @@ void Adafruit_Marquee::cbBitmapMsg(char *data, uint16_t len) {
 }
 
 /*!
-    @brief  Callback for sleep feed messages.
+    @brief  Callback for sleep feed messages, parses and stores the sleep feed's JSON data into the class instance.
     @param  data  The message payload.
     @param  len   Payload length, in bytes.
 */
@@ -156,6 +156,33 @@ void Adafruit_Marquee::cbSleepMsg(char *data, uint16_t len) {
     return;
   MQ_DEBUG_PRINT("Sleep feed received <- ");
   MQ_DEBUG_PRINTLN(data);
+
+  // Parse and store the sleep feed JSON in the class' instance
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, data, len);
+  if (error) {
+    MQ_DEBUG_PRINTLN("Sleep feed JSON parse failed");
+    return;
+  }
+
+  if (doc["alarm_type"] == "timer") {
+    _instance->_sleep_alarm = SLEEP_ALARM_TIMER;
+  } else {
+    _instance->_sleep_alarm = SLEEP_ALARM_NONE;
+  }
+
+  if (doc["sleep_mode"] == "deep") {
+    _instance->_sleep_mode = SLEEP_MODE_DEEP;
+  } else if (doc["sleep_mode"] == "light") {
+    _instance->_sleep_mode = SLEEP_MODE_LIGHT;
+  } else {
+    _instance->_sleep_mode = SLEEP_MODE_NONE;
+  }
+
+  _instance->_sleep_duration = doc["duration"] | 0;
+
+  // Set the flag to process within the loop 
+  _instance->_sleep_pending = true;
 }
 
 /*!
@@ -163,6 +190,8 @@ void Adafruit_Marquee::cbSleepMsg(char *data, uint16_t len) {
  */
 Adafruit_Marquee::Adafruit_Marquee() {
   _display = nullptr;
+  _device_name = nullptr;
+
   _mqtt = nullptr;
   _last_ping = 0;
   _last_wifi_attempt = 0;
@@ -172,23 +201,29 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _sub_sleep = nullptr;
   _pending_bmp = nullptr;
   _pending_len = 0;
-  _width = 0;
-  _height = 0;
-  _thinkInkMode = THINKINK_MONO;
-  _begin_status = SUCCESS;
   _ssid = nullptr;
   _pass = nullptr;
   _aio_username = nullptr;
   _aio_key = nullptr;
-  _device_name = nullptr;
+
+  _thinkInkMode = THINKINK_MONO;
+  _begin_status = SUCCESS;
   _pin_cs = -1;
   _pin_dc = -1;
   _pin_rst = -1;
   _pin_busy = -1;
   _pin_sram_cs = -1;
   _rotation = 0;
+  _width = 0;
+  _height = 0;
+
   fs_formatted = false;
   fs_changed = true;
+
+  _sleep_mode = SLEEP_MODE_NONE;
+  _sleep_alarm = SLEEP_ALARM_NONE;
+  _sleep_pending = false;
+  _sleep_duration = 0;
 }
 
 /*!
@@ -558,6 +593,7 @@ void Adafruit_Marquee::run() {
   // Draw any bitmap queued by the bitmap feed callback
   drawBitmap();
   // TODO: Handle sleep feed messages
+  handleSleep();
 }
 
 /*!
@@ -671,3 +707,71 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
                   (unsigned)decoded_len);
   return true;
 }
+
+// Sleep API 
+#ifdef ARDUINO_ARCH_ESP32
+void print_wakeup_reason() {
+  esp_sleep_wakeup_cause_t wakeup_reason;
+  wakeup_reason = esp_sleep_get_wakeup_cause();
+
+  switch (wakeup_reason) {
+    case ESP_SLEEP_WAKEUP_EXT0:     Serial.println("Wakeup caused by external signal using RTC_IO"); break;
+    case ESP_SLEEP_WAKEUP_EXT1:     Serial.println("Wakeup caused by external signal using RTC_CNTL"); break;
+    case ESP_SLEEP_WAKEUP_TIMER:    Serial.println("Wakeup caused by timer"); break;
+    case ESP_SLEEP_WAKEUP_TOUCHPAD: Serial.println("Wakeup caused by touchpad"); break;
+    case ESP_SLEEP_WAKEUP_ULP:      Serial.println("Wakeup caused by ULP program"); break;
+    default:                        Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason); break;
+  }
+}
+
+/*!
+    @brief  Enables the ESP32 timer wakeup source.
+    @param  wakeup_time_sec  The number of seconds to wait before waking up.
+    @return True if the timer wakeup was successfully enabled, False if wakeup time is out of range
+*/
+bool enableTimerWakeup(uint64_t wakeup_time_sec) {
+  esp_err_t err = esp_sleep_enable_timer_wakeup(wakeup_time_sec * 1000000ULL);
+  if (err != ESP_OK) {
+    Serial.printf("Failed to enable timer wakeup: %d\n", err);
+    return false;
+  }
+  return true;
+}
+#endif // ARDUINO_ARCH_ESP32
+
+
+/*!
+    @brief  Handles sleep feed messages
+*/
+void Adafruit_Marquee::handleSleep() {
+  if (!_sleep_pending) {
+    return;
+  }
+
+  // Attempt to set the sleep timer
+  // NOTE/TODO: We aren't parsing the sleep alarm type (_sleep_alarm) here yet, but can
+  if (!enableTimerWakeup(_sleep_duration)) {
+    MQ_DEBUG_PRINTLN("[sleep] ERROR: Failed to enable timer wakeup");
+    _sleep_pending = false;
+    return;
+  }
+
+  // Handle sleep based on the stored sleep mode and duration
+  switch (_sleep_mode) {
+    case SLEEP_MODE_DEEP:
+      MQ_DEBUG_PRINTLN("[sleep] Entering deep sleep mode");
+      esp_deep_sleep_start();
+      break; // NOTE: This is never reached
+    case SLEEP_MODE_LIGHT:
+      // TODO: Implement light sleep logic here
+      break;
+    default:
+      MQ_DEBUG_PRINTLN("[sleep] ERROR: Unsupported sleep mode");
+      _sleep_pending = false;
+      break;
+  }
+
+  // Clear the sleep pending flag
+  _sleep_pending = false;
+}
+

@@ -73,6 +73,17 @@ typedef enum {
   ERR_INVALID_CREDS = -7,
 } mq_begin_status_t; ///< Return codes for Adafruit_Marquee::begin()
 
+typedef enum {
+  SLEEP_ALARM_NONE = 0,
+  SLEEP_ALARM_TIMER = 1,
+} mq_sleep_alarm_t; ///< Sleep alarm types
+
+typedef enum {
+  SLEEP_MODE_NONE = 0,
+  SLEEP_MODE_LIGHT = 1,
+  SLEEP_MODE_DEEP = 2,
+} mq_sleep_mode_t; ///< Sleep modes
+
 /*!
  * @brief Client for the Adafruit IO Marquee feature.
  */
@@ -164,6 +175,13 @@ protected:
   // Network interface within networking/
   virtual void _connect() = 0;
   virtual void _disconnect() = 0;
+
+  // Sleep API
+  void handleSleep();
+  bool _sleep_pending; ///< True if a sleep request is pending, False otherwise
+  mq_sleep_mode_t _sleep_mode; ///< Sleep mode
+  mq_sleep_alarm_t _sleep_alarm; ///< Sleep alarm type
+  uint64_t _sleep_duration; ///< Sleep duration, in seconds
 };
 
 #endif // ADAFRUIT_MARQUEE_H
