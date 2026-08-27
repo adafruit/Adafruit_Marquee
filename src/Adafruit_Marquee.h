@@ -18,7 +18,8 @@
 #include <functional>
 #include <map>
 #include <Adafruit_ThinkInk.h>
-#include <AdafruitIO_WiFi.h>
+#include <Adafruit_MQTT.h>
+#include <Adafruit_MQTT_Client.h>
 #include <ArduinoJson.h>
 #include "Adafruit_TinyUSB.h"
 #include "SdFat_Adafruit_Fork.h"
@@ -51,25 +52,18 @@
 /*!
     @brief  Bring-up step trace.
 
-    Prints the step, the calling task's remaining stack, and free internal/PSRAM
-    heap, then flushes. This exists because the ESP32-S2 has no USB-Serial-JTAG
-    peripheral: its USB is OTG driven in software by TinyUSB, the IDF console is
-    UART0 (CONFIG_ESP_CONSOLE_UART_NUM=0), and the panic handler runs with
-    interrupts off - so a backtrace goes out GPIO43 and never reaches the USB
-    CDC port. With PANIC_PRINT_REBOOT and a 0s delay, the last line that made it
-    out over USB is the only evidence of where execution stopped.
-
-    stack= is the high-water mark in bytes remaining; if it trends toward 0 the
-    fault is stack exhaustion (loopTask defaults to 8KB) rather than a bad
-    pointer.
+    Prints the step and flushes. This exists because the ESP32-S2 has no
+    USB-Serial-JTAG peripheral: its USB is OTG driven in software by TinyUSB,
+    the IDF console is UART0 (CONFIG_ESP_CONSOLE_UART_NUM=0), and the panic
+    handler runs with interrupts off - so a backtrace goes out GPIO43 and never
+    reaches the USB CDC port. With PANIC_PRINT_REBOOT and a 0s delay, the last
+    step that made it out over USB is the only evidence of where execution
+    stopped.
 */
 #if MARQUEE_DEBUG
 #define MQ_TRACE(step)                                                         \
   do {                                                                         \
-    Serial.printf("[trace] %-24s stack=%u heap=%u psram=%u\n", (step),         \
-                  (unsigned)uxTaskGetStackHighWaterMark(NULL),                 \
-                  (unsigned)ESP.getFreeHeap(),                                 \
-                  (unsigned)ESP.getFreePsram());                               \
+    Serial.printf("[trace] %s\n", (step));                                     \
     Serial.flush();                                                            \
   } while (0)
 #else
@@ -90,10 +84,48 @@
 /*!
     @brief  Payload buffer for the bitmap subscription, in bytes. Must hold a
             whole MQTT PUBLISH payload: ~20,980 base64 chars for a 250x122 4bpp
-            BMP, plus headroom. Adafruit_MQTT's MAXBUFFERSIZE must be at least
-            this plus the fixed header, remaining-length varint and topic.
+            BMP, plus headroom. MQ_MQTT_BUFFER_LEN below is derived from this.
 */
 #define MQ_BITMAP_SUB_LEN 22528
+/*!
+    @brief  Packet buffer for the MQTT client, in bytes.
+
+    One buffer serves every incoming and outgoing packet, so it must hold the
+    largest of them: the bitmap PUBLISH. That is the payload plus
+    MQTT_PUBLISH_FRAMING_OVERHEAD (fixed header + remaining-length varint +
+    topic-length + packet id) plus the topic itself, so it has to be strictly
+    larger than MQ_BITMAP_SUB_LEN - sizing the two equally leaves a
+    maximum-length payload unable to fit through the buffer that carries it.
+    The 256 bytes of headroom cover any topic this library builds.
+*/
+#define MQ_MQTT_BUFFER_LEN (MQ_BITMAP_SUB_LEN + 256)
+
+/*! @brief  Adafruit IO MQTT host. */
+#define MQ_IO_HOST "io.adafruit.us"
+/*! @brief  Adafruit IO MQTT port, TLS. */
+#define MQ_IO_MQTT_PORT 8883
+
+/*!
+    @brief  How long processPackets() spends waiting on the socket per run(),
+            in milliseconds. Short enough that run() stays responsive for the
+            EPD draw path; the value Adafruit IO's client used by default.
+*/
+#define MQ_PACKET_READ_MS 100
+/*!
+    @brief  PINGREQ interval, in milliseconds. Well inside the 300s
+            MQTT_CONN_KEEPALIVE the client negotiates.
+*/
+#define MQ_PING_INTERVAL_MS 60000
+/*! @brief  Minimum wait between WiFi association attempts, in milliseconds. */
+#define MQ_WIFI_RETRY_MS 5000
+/*! @brief  Minimum wait between MQTT connect attempts, in milliseconds. */
+#define MQ_MQTT_RETRY_MS 10000
+/*!
+    @brief  Wait after a CONNACK that rejected us on protocol or credentials,
+            in milliseconds. Retrying those at MQ_MQTT_RETRY_MS just hammers
+            the broker with a request that cannot start succeeding on its own.
+*/
+#define MQ_MQTT_FATAL_RETRY_MS 60000
 
 typedef enum {
   SUCCESS = 0,
@@ -108,56 +140,33 @@ typedef enum {
 
 
 /*!
-    @brief  Exposes AdafruitIO's MQTT client.
-
-    AdafruitIO keeps _mqtt protected and only befriends its own feed/group
-    classes, but a derived class may reach it. That lets the bitmap feed use a
-    raw Adafruit_MQTT_Subscribe with a large per-subscription payload buffer,
-    bypassing AdafruitIO_Data - whose _value is 45 bytes (AIO_DATA_LENGTH) and
-    is filled by an unbounded strcpy, so it cannot carry a bitmap.
-
-    Note AdafruitIO_WiFi is a typedef (AdafruitIO_ESP32 on ESP32), not a class,
-    so the constructor is spelled out rather than inherited with `using`.
-*/
-class MarqueeIO : public AdafruitIO_WiFi {
-public:
-  /*!
-      @brief  Constructs the Adafruit IO WiFi client.
-      @param  user  Adafruit IO username.
-      @param  key   Adafruit IO key.
-      @param  ssid  WiFi SSID.
-      @param  pass  WiFi password.
-  */
-  MarqueeIO(const char *user, const char *key, const char *ssid,
-            const char *pass)
-      : AdafruitIO_WiFi(user, key, ssid, pass) {}
-  /*!
-      @brief  Returns the underlying MQTT client.
-      @return Pointer to the Adafruit_MQTT client, or nullptr if unbuilt.
-  */
-  Adafruit_MQTT *mqtt() { return _mqtt; }
-};
-
-/*!
  * @brief Client for the Adafruit IO Marquee feature.
  */
 class Adafruit_Marquee {
 public:
   Adafruit_Marquee();
-  ~Adafruit_Marquee();
+  virtual ~Adafruit_Marquee();
   mq_begin_status_t begin();
   bool connect(unsigned long timeout = 30000);
   void run();
   bool queueBitmapBase64(const char *b64);
-
-  static bool fs_formatted;
   static volatile bool fs_changed;
-private:
+
+  // Network interface within networking/
+  virtual bool networkConnected() = 0;
+  virtual int networkStatus() = 0;
+  virtual const char *connectionType() = 0;
+protected:
+  static bool fs_formatted;
   mq_begin_status_t _begin_status;
   JsonDocument _cfg_doc;
   bool initFilesystem();
   void initUSBMSC();
-  bool initAIO();
+  bool initMQTT();
+  bool connectWiFi(unsigned long timeout);
+  bool connectMQTT();
+  void maintainConnection();
+  void requestBitmap();
   bool createEPD(const char *panel);
   bool parseThinkInkMode(const char* mode);
   bool draw(const uint8_t *bmp, size_t len);
@@ -167,7 +176,7 @@ private:
   /*!
       @brief  The instance the MQTT callbacks dispatch to. Adafruit_MQTT takes
               plain function pointers, so the callbacks are static members that
-              trampoline through this. Set by initAIO().
+              trampoline through this. Set by initMQTT().
   */
   static Adafruit_Marquee *_instance;
   Adafruit_EPD *_display; ///< Pointer to the EPD display object
@@ -186,7 +195,7 @@ private:
   uint8_t *_pending_bmp; ///< Decoded BMP bytes, or nullptr
   size_t _pending_len;   ///< Byte length of _pending_bmp
   // Plain bool, not volatile: the MQTT callbacks are dispatched synchronously
-  // on the calling task from inside _io->run(), not from an ISR.
+  // on the calling task from inside processPackets(), not from an ISR.
   bool _pending_draw; ///< Set by cbBitmapMsg(), cleared by servicePendingDraw()
   // Networking
   const char* _ssid; ///< WiFi SSID
@@ -195,10 +204,20 @@ private:
   const char* _aio_username; ///< Adafruit IO username
   const char* _aio_key; ///< Adafruit IO key
   const char *_device_name; ///< Device name for Adafruit IO
-  MarqueeIO *_io; ///< Pointer to the Adafruit IO WiFi client
-  // The bitmap and sleep feeds both use raw subscriptions rather than
-  // AdafruitIO_Feed: the bitmap payload does not fit AdafruitIO_Data's 45-byte
-  // _value, and routing the sleep feed the same way keeps one code path.
+  Adafruit_MQTT_Client *_mqtt; ///< MQTT client, owns the packet buffer
+  unsigned long _last_ping;         ///< millis() of the last PINGREQ
+  unsigned long _last_wifi_attempt; ///< millis() of the last attempt
+  unsigned long _last_mqtt_attempt; ///< millis() of the last MQTT connect()
+  /*!
+      @brief  How long maintainConnection() waits before retrying MQTT. Bumped
+              to MQ_MQTT_FATAL_RETRY_MS by a CONNACK that rejected the protocol
+              level or the credentials.
+  */
+  unsigned long _mqtt_retry_ms;
+  // Both feeds are plain MQTT topics rather than an Adafruit IO feed wrapper:
+  // that wrapper copies the payload into a 45-byte value buffer, which a
+  // bitmap would overrun, and routing the sleep feed the same way keeps one
+  // code path.
   Adafruit_MQTT_Subscribe *_sub_bmp;   ///< Subscription for the bitmap topic
   Adafruit_MQTT_Subscribe *_sub_sleep; ///< Subscription for the sleep topic
   Adafruit_MQTT_Publish *_pub_bmp_get; ///< Publishes to the bitmap /get topic
@@ -207,6 +226,10 @@ private:
   char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];     ///< <user>/f/<feed>/csv
   char _topic_bmp_get[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>/csv/get
   char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96];   ///< <user>/f/<feed>/csv
+
+  // Network interface within networking/
+  virtual void _connect() = 0;
+  virtual void _disconnect() = 0;
 };
 
 #endif // ADAFRUIT_MARQUEE_H

@@ -44,9 +44,9 @@ bool Adafruit_Marquee::fs_formatted;
 // Set to true when the PC writes to flash
 volatile bool Adafruit_Marquee::fs_changed;
 
-// Set in initAIO(). Adafruit_MQTT_Subscribe::setCallback takes a plain function
-// pointer, so the feed callbacks are static members that trampoline through
-// this. A sketch only ever constructs one Adafruit_Marquee.
+// Set in initMQTT(). Adafruit_MQTT_Subscribe::setCallback takes a plain
+// function pointer, so the feed callbacks are static members that trampoline
+// through this. A sketch only ever constructs one Adafruit_Marquee.
 Adafruit_Marquee *Adafruit_Marquee::_instance = nullptr;
 
 // Callback invoked when received READ10 command.
@@ -142,15 +142,14 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
 
 /*!
     @brief  Callback for bitmap feed messages. Forwards the payload to the
-            instance registered by initAIO().
+            instance registered by initMQTT().
     @param  data  The message payload: a base64-encoded BMP. Adafruit_MQTT
                   nul-terminates this, so it can be treated as a C string.
     @param  len   Payload length, in bytes.
 */
 void Adafruit_Marquee::cbBitmapMsg(char *data, uint16_t len) {
-  MQ_DEBUG_PRINTF("[trace] cbBitmapMsg: len=%u inst=%p data=%p stack=%u\n",
-                  (unsigned)len, _instance, data,
-                  (unsigned)uxTaskGetStackHighWaterMark(NULL));
+  MQ_DEBUG_PRINTF("[trace] cbBitmapMsg: len=%u inst=%p data=%p\n",
+                  (unsigned)len, _instance, data);
   Serial.flush();
   if (!_instance || !data || len == 0)
     return;
@@ -175,7 +174,11 @@ void Adafruit_Marquee::cbSleepMsg(char *data, uint16_t len) {
  */
 Adafruit_Marquee::Adafruit_Marquee() {
   _display = nullptr;
-  _io = nullptr;
+  _mqtt = nullptr;
+  _last_ping = 0;
+  _last_wifi_attempt = 0;
+  _last_mqtt_attempt = 0;
+  _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
   _sub_bmp = nullptr;
   _sub_sleep = nullptr;
   _pub_bmp_get = nullptr;
@@ -221,8 +224,10 @@ Adafruit_Marquee::~Adafruit_Marquee() {
   _sub_sleep = nullptr;
   delete _pub_bmp_get;
   _pub_bmp_get = nullptr;
-  delete _io;
-  _io = nullptr;
+  // Order matters: the subscriptions above hold a back-pointer to the client,
+  // and the client writes through the socket.
+  delete _mqtt;
+  _mqtt = nullptr;
   if (_instance == this) {
     _instance = nullptr;
   }
@@ -375,31 +380,34 @@ void Adafruit_Marquee::initUSBMSC() {
 }
 
 /*!
- * @brief Initializes the Adafruit IO client and subscribes to the marquee feeds.
+ * @brief Builds the MQTT client, via the subclass, and the feed
+ *        subscriptions over it.
  * @returns True if initialization succeeded, False otherwise.
  */
-bool Adafruit_Marquee::initAIO() {
+bool Adafruit_Marquee::initMQTT() {
   // Publish ourselves to the static feed callbacks before subscribing, so a
-  // message arriving on the first _io->run() has somewhere to land.
+  // message arriving on the first processPackets() has somewhere to land.
   _instance = this;
 
-  MQ_TRACE("initAIO: enter");
-
-  // Attempt to create the Adafruit IO client
-  _io = new MarqueeIO(_aio_username, _aio_key, _ssid, _pass);
-  if (!_io || !_io->mqtt())
+  MQ_TRACE("initMQTT: enter");
+  // Zero means the allocation failed. Nothing downstream is safe in that state
+  // - connect(), publish() and ping() all write through the buffer, and ping()
+  // takes no size argument to guard itself with - so stop here.
+  if (_mqtt->bufferSize() == 0) {
+    MQ_DEBUG_PRINTF("[mqtt] ERROR: could not allocate %u byte packet buffer\n",
+                    (unsigned)MQ_MQTT_BUFFER_LEN);
     return false;
-  MQ_TRACE("initAIO: client built");
+  }
+  MQ_TRACE("initMQTT: client built");
 
   snprintf(_feed_name_bmp, sizeof(_feed_name_bmp), "%s.bitmap", _device_name);
   snprintf(_feed_name_sleep, sizeof(_feed_name_sleep), "%s.sleep",
            _device_name);
 
-  // Subscribe with raw Adafruit_MQTT_Subscribe objects rather than
-  // AdafruitIO_Feed. AdafruitIO_Feed routes the payload through
-  // AdafruitIO_Data, whose _value is 45 bytes (AIO_DATA_LENGTH) and is filled
-  // by an unbounded strcpy - a bitmap payload would both truncate and overrun.
-  // A raw subscription hands us its own buffer, sized below.
+  // The feeds are plain MQTT topics on purpose. Adafruit IO's own feed wrapper
+  // routes a payload through a 45-byte value buffer filled by an unbounded
+  // strcpy, so a bitmap would both truncate and overrun; a raw subscription
+  // hands us its own buffer, sized below.
   snprintf(_topic_bmp, sizeof(_topic_bmp), "%s/f/%s/csv", _aio_username,
            _feed_name_bmp);
   snprintf(_topic_bmp_get, sizeof(_topic_bmp_get), "%s/f/%s/csv/get",
@@ -409,10 +417,10 @@ bool Adafruit_Marquee::initAIO() {
 
   // Only the bitmap subscription needs the large payload buffer; the sleep
   // subscription takes the library default so it costs a few hundred bytes.
-  _sub_bmp = new Adafruit_MQTT_Subscribe(_io->mqtt(), _topic_bmp, 0,
-                                         MQ_BITMAP_SUB_LEN);
-  _sub_sleep = new Adafruit_MQTT_Subscribe(_io->mqtt(), _topic_sleep);
-  _pub_bmp_get = new Adafruit_MQTT_Publish(_io->mqtt(), _topic_bmp_get);
+  _sub_bmp =
+      new Adafruit_MQTT_Subscribe(_mqtt, _topic_bmp, 0, MQ_BITMAP_SUB_LEN);
+  _sub_sleep = new Adafruit_MQTT_Subscribe(_mqtt, _topic_sleep);
+  _pub_bmp_get = new Adafruit_MQTT_Publish(_mqtt, _topic_bmp_get);
   if (!_sub_bmp || !_sub_sleep || !_pub_bmp_get)
     return false;
   if (_sub_bmp->lastread == nullptr) {
@@ -421,27 +429,27 @@ bool Adafruit_Marquee::initAIO() {
     return false;
   }
 
-  // Adafruit_MQTT::bufferSize is protected; MAXBUFFERSIZE is what it was sized
-  // from, and the assertion in the example sketch checks that it took effect.
-  MQ_DEBUG_PRINTF("[bmp] sub payload buffer: %u bytes, MAXBUFFERSIZE: %u, "
-                  "free internal heap: %u, free PSRAM: %u\n",
-                  (unsigned)_sub_bmp->lastread_max, (unsigned)MAXBUFFERSIZE,
-                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getFreePsram());
+  // Both sizes, out loud, at boot: the whole bitmap path depends on them and a
+  // failed allocation is otherwise silent until a payload truncates.
+  MQ_DEBUG_PRINTF("[bmp] sub payload buffer: %u bytes, packet buffer: %u\n",
+                  (unsigned)_sub_bmp->lastread_max,
+                  (unsigned)_mqtt->bufferSize());
 
-  MQ_TRACE("initAIO: subs allocated");
+  MQ_TRACE("initMQTT: subs allocated");
 
   _sub_bmp->setCallback(cbBitmapMsg);
   _sub_sleep->setCallback(cbSleepMsg);
 
   // subscribe() only registers into the subscriptions[] array; the SUBSCRIBE
-  // packets are sent by Adafruit_MQTT::connect(), which runs after this.
-  if (!_io->mqtt()->subscribe(_sub_bmp) ||
-      !_io->mqtt()->subscribe(_sub_sleep)) {
+  // packets are sent by Adafruit_MQTT::connect(), which runs after this. That
+  // also means they are re-sent on every reconnect, so nothing has to be
+  // re-registered when the link drops.
+  if (!_mqtt->subscribe(_sub_bmp) || !_mqtt->subscribe(_sub_sleep)) {
     MQ_DEBUG_PRINTLN("Failed to register MQTT subscriptions");
     return false;
   }
 
-  MQ_TRACE("initAIO: subs registered");
+  MQ_TRACE("initMQTT: subs registered");
 
   MQ_DEBUG_PRINT("Subscribing to feed: ");
   MQ_DEBUG_PRINTLN(_topic_bmp);
@@ -451,55 +459,111 @@ bool Adafruit_Marquee::initAIO() {
 }
 
 /*!
- * @brief Connects to the Adafruit IO service.
+    @brief  Associates with the configured WiFi network, blocking until it is
+            up or the timeout expires.
+    @param  timeout  Maximum time to wait for an association, in milliseconds.
+    @return True once the platform reports an association, else False.
+*/
+bool Adafruit_Marquee::connectWiFi(unsigned long timeout) {
+  if (!_ssid || strlen(_ssid) == 0) {
+    MQ_DEBUG_PRINTLN("[wifi] ERROR: no SSID configured");
+    return false;
+  }
+
+  MQ_DEBUG_PRINTF("[wifi] connecting to '%s'\n", _ssid);
+  Serial.flush();
+  _connect();
+  _last_wifi_attempt = millis();
+  MQ_TRACE("connectWiFi: post-begin");
+
+  // Settle before the first check, not after it. _connect() disconnects on
+  // the way in, and networkConnected() can still report the old association for
+  // a short window afterwards - polling it immediately would return success
+  // for a link that is actually down.
+  unsigned long start = millis();
+  for (;;) {
+    delay(250);
+    if (networkConnected())
+      break;
+    if (millis() - start >= timeout) {
+      MQ_DEBUG_PRINTF("[wifi] TIMEOUT after %lums, status=%d\n",
+                      millis() - start, networkStatus());
+      return false;
+    }
+  }
+
+  MQ_TRACE("connectWiFi: connected");
+  return true;
+}
+
+/*!
+    @brief  Opens the MQTT session. Credentials went in at construction, so
+            this is the no-argument connect().
+    @return True on CONNACK success, else False.
+*/
+bool Adafruit_Marquee::connectMQTT() {
+  MQ_TRACE("connectMQTT: enter");
+  _last_mqtt_attempt = millis();
+  int8_t rc = _mqtt->connect();
+  if (rc == 0) {
+    // A previous rejection may have stretched the retry interval; a successful
+    // CONNACK means the credentials are fine, so put it back.
+    _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
+    MQ_TRACE("connectMQTT: connected");
+    return true;
+  }
+
+  MQ_DEBUG_PRINT("[mqtt] connect failed: ");
+  MQ_DEBUG_PRINTLN(_mqtt->connectErrorString(rc));
+  // 1 wrong protocol, 2 client id rejected, 4 bad user/pass, 5 unauthorized.
+  // None of these start working on their own, so back off hard rather than
+  // hammering the broker every MQ_MQTT_RETRY_MS with the same rejected CONNECT.
+  if (rc == 1 || rc == 2 || rc == 4 || rc == 5) {
+    _mqtt_retry_ms = MQ_MQTT_FATAL_RETRY_MS;
+  } else {
+    _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
+  }
+  return false;
+}
+
+/*!
+    @brief  Asks the broker to re-send the bitmap feed's last value.
+
+    Publishing to the feed's /get topic is Adafruit IO's "send me the current
+    value" convention. Note Adafruit_MQTT_Publish has no (const char *, length)
+    overload - passing a length here would bind to publish(const char *, bool
+    retain) and publish a *retained* empty message to the feed instead.
+*/
+void Adafruit_Marquee::requestBitmap() {
+  if (!_pub_bmp_get)
+    return;
+  MQ_TRACE("requestBitmap: pre publish");
+  _pub_bmp_get->publish("\0");
+  MQ_TRACE("requestBitmap: post publish");
+}
+
+/*!
+ * @brief Connects to WiFi and the Adafruit IO MQTT broker.
  * @param timeout The maximum time to wait for a connection, in milliseconds.
  * @returns True if connection succeeded, otherwise false.
  */
 bool Adafruit_Marquee::connect(unsigned long timeout) {
   MQ_TRACE("connect: enter");
-  if (!initAIO()) {
-    MQ_DEBUG_PRINTLN("Failed to initialize Adafruit IO client and feeds");
+  if (!initMQTT()) {
+    MQ_DEBUG_PRINTLN("Failed to initialize the MQTT client and feeds");
+    return false;
+  }
+  MQ_TRACE("connect: initMQTT ok");
+
+  if (!connectWiFi(timeout)) {
     return false;
   }
 
-  MQ_TRACE("connect: initAIO ok");
-
-  // Attempt to connect to Adafruit IO within the timeout period. _io->connect()
-  // brings up WiFi and then the MQTT session; a fault inside it is the reason
-  // the traces around it are this dense.
-  _io->connect();
-  MQ_TRACE("connect: io->connect ret");
-
-  unsigned long start = millis();
-  aio_status_t prev_status = (aio_status_t)-1;
-  while (_io->status() < AIO_CONNECTED) {
-    aio_status_t st = _io->status();
-    if (st != prev_status) {
-      MQ_DEBUG_PRINTF("[trace] connect: status -> %d after %lums\n", (int)st,
-                      millis() - start);
-      Serial.flush();
-      prev_status = st;
-    }
-    if (millis() - start >= timeout) {
-      MQ_DEBUG_PRINTF("[trace] connect: TIMEOUT at status %d\n", (int)st);
-      return false;
-    }
-    delay(500);
+  if (!connectMQTT()) {
+    return false;
   }
-  MQ_TRACE("connect: AIO_CONNECTED");
 
-  // Ask the broker to re-send the feed's last value. Publishing to the /get
-  // topic is what AdafruitIO_Feed::get() does; we do it directly because the
-  // bitmap feed has no AdafruitIO_Feed object.
-  // Matches AdafruitIO_Feed::get(). Note publish() has no (const char*, len)
-  // overload, so passing a length here would bind to the `retain` bool and
-  // publish a *retained* empty message.
-  MQ_TRACE("connect: pre /get publish");
-  if (_pub_bmp_get) {
-    _pub_bmp_get->publish("\0");
-  }
-  MQ_TRACE("connect: post /get publish");
-
+  requestBitmap();
   return true;
 }
 
@@ -528,8 +592,8 @@ void Adafruit_Marquee::servicePendingDraw() {
   _pending_len = 0;
   _pending_draw = false;
 
-  MQ_DEBUG_PRINTF("[trace] servicePendingDraw: bmp=%p len=%u stack=%u\n", bmp,
-                  (unsigned)len, (unsigned)uxTaskGetStackHighWaterMark(NULL));
+  MQ_DEBUG_PRINTF("[trace] servicePendingDraw: bmp=%p len=%u\n", bmp,
+                  (unsigned)len);
   Serial.flush();
   if (!draw(bmp, len)) {
     MQ_DEBUG_PRINTLN("[bmp] ERROR: draw() rejected the bitmap");
@@ -539,8 +603,50 @@ void Adafruit_Marquee::servicePendingDraw() {
   MQ_TRACE("servicePendingDraw: freed");
 }
 
+/*!
+    @brief  Keeps WiFi and the MQTT session up and pumps incoming packets.
+
+    Non-blocking by design: a retry that is not due yet returns immediately
+    rather than waiting, so a down network never starves the EPD draw path or
+    the USB MSC endpoint. The cost is that recovery is only as prompt as the
+    caller's loop.
+*/
+void Adafruit_Marquee::maintainConnection() {
+  if (!networkConnected()) {
+    if (millis() - _last_wifi_attempt >= MQ_WIFI_RETRY_MS) {
+      MQ_DEBUG_PRINTLN("[wifi] disconnected, re-associating");
+      _last_wifi_attempt = millis();
+      _connect();
+    }
+    // Nothing else can make progress without a link. Come back next loop().
+    return;
+  }
+
+  if (!_mqtt->connected()) {
+    if (millis() - _last_mqtt_attempt < _mqtt_retry_ms) {
+      return;
+    }
+    MQ_DEBUG_PRINTLN("[mqtt] disconnected, reconnecting");
+    if (!connectMQTT()) {
+      return;
+    }
+    // connect() re-sent every SUBSCRIBE, but the broker will not re-push the
+    // feed's last value on its own - so ask for it. Without this the panel
+    // keeps whatever it drew before the drop until the feed next changes.
+    requestBitmap();
+    return;
+  }
+
+  _mqtt->processPackets(MQ_PACKET_READ_MS);
+
+  if (millis() - _last_ping >= MQ_PING_INTERVAL_MS) {
+    _last_ping = millis();
+    _mqtt->ping();
+  }
+}
+
 void Adafruit_Marquee::run() {
-  if (!_io)
+  if (!_mqtt)
     return;
 
   // Heartbeat, so a hang or a silent reboot mid-loop is distinguishable from
@@ -548,16 +654,13 @@ void Adafruit_Marquee::run() {
   static unsigned long prv_beat = 0;
   if (millis() - prv_beat > 5000) {
     prv_beat = millis();
-    MQ_DEBUG_PRINTF("[trace] run: status=%d stack=%u heap=%u psram=%u\n",
-                    (int)_io->status(),
-                    (unsigned)uxTaskGetStackHighWaterMark(NULL),
-                    (unsigned)ESP.getFreeHeap(),
-                    (unsigned)ESP.getFreePsram());
+    MQ_DEBUG_PRINTF("[trace] run: wifi=%d mqtt=%d\n", networkStatus(),
+                    (int)_mqtt->connected());
     Serial.flush();
   }
 
   servicePendingDraw();
-  _io->run();
+  maintainConnection();
 }
 
 
