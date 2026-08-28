@@ -17,15 +17,15 @@
  */
 #include "Adafruit_Marquee.h"
 #include <base64.hpp>
+#include <CRC.h>
 
+Adafruit_Marquee *Adafruit_Marquee::_instance = nullptr; ///< Pointer to the instance that the MQTT callbacks dispatch to
+
+// For ESP32 sleep modes
 #ifdef ARDUINO_ARCH_ESP32
-// esp_sleep.h already arrives via Arduino.h -> esp32-hal.h, but the sleep path
-// depends on it directly, so name it here rather than lean on that chain.
 #include <esp_sleep.h>
-// Light sleep needs the WiFi driver in a power-save mode it can coordinate
-// with. Going through the IDF call rather than WiFi.setSleep() keeps this file
-// free of the Arduino WiFi class, which lives behind the networking/ adapter.
 #include <esp_wifi.h>
+static RTC_DATA_ATTR uint32_t prvBmpCrc; ///< CRC32 of the bitmap, stored before sleep
 #endif // ARDUINO_ARCH_ESP32
 
 // for flashTransport definition
@@ -44,22 +44,12 @@ static FatVolume fatfs;
 static FatFile root;
 static FatFile file;
 
-// USB Mass Storage object
-static Adafruit_USBD_MSC usb_msc;
+static Adafruit_USBD_MSC usb_msc; ///< USB Mass Storage device object
 
-#ifdef ARDUINO_ARCH_ESP32
-//static RTC_DATA_ATTR bool s_slept_deep = false;
-#endif // ARDUINO_ARCH_ESP32
 
-// Check if flash is formatted
-bool Adafruit_Marquee::fs_formatted;
-// Set to true when the PC writes to flash
-volatile bool Adafruit_Marquee::fs_changed;
 
-// Set in initMqtt(). Adafruit_MQTT_Subscribe::setCallback takes a plain
-// function pointer, so the feed callbacks are static members that trampoline
-// through this. A sketch only ever constructs one Adafruit_Marquee.
-Adafruit_Marquee *Adafruit_Marquee::_instance = nullptr;
+bool Adafruit_Marquee::fs_formatted; ///< True when the filesystem is formatted, False otherwise
+volatile bool Adafruit_Marquee::fs_changed; ///< True when the filesystem is changed by the host over USB MSC, False otherwise
 
 // Callback invoked when received READ10 command.
 // Copy disk's data to buffer (up to bufsize) and
@@ -148,59 +138,6 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
 }
 
 /*!
-    @brief  Callback for bitmap feed messages. Forwards the payload to the
-            instance registered by initMqtt().
-    @param  data  The message payload: a base64-encoded BMP. Adafruit_MQTT
-                  nul-terminates this, so it can be treated as a C string.
-    @param  len   Payload length, in bytes.
-*/
-void Adafruit_Marquee::cbBitmapMsg(char *data, uint16_t len) {
-  if (!_instance || !data || len == 0)
-    return;
-  _instance->decodeb64Bmp(data, len);
-}
-
-/*!
-    @brief  Callback for sleep feed messages, parses and stores the sleep feed's JSON data into the class instance.
-    @param  data  The message payload.
-    @param  len   Payload length, in bytes.
-*/
-void Adafruit_Marquee::cbSleepMsg(char *data, uint16_t len) {
-  if (!_instance || !data || len == 0)
-    return;
-  MQ_DEBUG_PRINT("Sleep feed received <- ");
-  MQ_DEBUG_PRINTLN(data);
-
-  // Parse and store the sleep feed JSON in the class' instance
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, data, len);
-  if (error) {
-    MQ_DEBUG_PRINTLN("Sleep feed JSON parse failed");
-    return;
-  }
-
-  if (doc["alarm_type"] == "timer") {
-    _instance->_sleep_alarm = SLEEP_ALARM_TIMER;
-  } else {
-    _instance->_sleep_alarm = SLEEP_ALARM_NONE;
-  }
-
-  if (doc["sleep_mode"] == "deep") {
-    _instance->_sleep_mode = SLEEP_MODE_DEEP;
-  } else if (doc["sleep_mode"] == "light") {
-    _instance->_sleep_mode = SLEEP_MODE_LIGHT;
-  } else {
-    _instance->_sleep_mode = SLEEP_MODE_NONE;
-  }
-
-  // Default to 60 seconds if not specified to avoid rapid sleep/wake cycling
-  _instance->_sleep_duration = doc["duration"] | 60;
-
-  // Set the flag to process within the loop 
-  _instance->_sleep_pending = true;
-}
-
-/*!
  * @brief Creates a new instance of the Adafruit Marquee client.
  */
 Adafruit_Marquee::Adafruit_Marquee() {
@@ -215,7 +152,8 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _sub_bmp = nullptr;
   _sub_sleep = nullptr;
   _pending_bmp = nullptr;
-  _pending_len = 0;
+  _pending_bmp_len = 0;
+  _pending_crc = 0;
   _ssid = nullptr;
   _pass = nullptr;
   _aio_username = nullptr;
@@ -237,8 +175,8 @@ Adafruit_Marquee::Adafruit_Marquee() {
 
   _sleep_mode = SLEEP_MODE_NONE;
   _sleep_alarm = SLEEP_ALARM_NONE;
-  _sleep_pending = false;
-  _sleep_duration = 0;
+  _is_sleep_pending = false;
+  _sleep_time = 60; // default to 60 seconds to avoid rapid wake/sleep cycling
 }
 
 /*!
@@ -253,13 +191,11 @@ Adafruit_Marquee::~Adafruit_Marquee() {
     free(_pending_bmp);
     _pending_bmp = nullptr;
   }
-  _pending_len = 0;
+  _pending_bmp_len = 0;
   delete _sub_bmp;
   _sub_bmp = nullptr;
   delete _sub_sleep;
   _sub_sleep = nullptr;
-  // Order matters: the subscriptions above hold a back-pointer to the client,
-  // and the client writes through the socket.
   delete _mqtt;
   _mqtt = nullptr;
   if (_instance == this) {
@@ -273,7 +209,6 @@ Adafruit_Marquee::~Adafruit_Marquee() {
  *          mq_begin_status_t describing the failure.
  */
 mq_begin_status_t Adafruit_Marquee::begin() {
-
   // Detach USB *before* touching the flash, mirroring Wippersnapper_FS
   TinyUSBDevice.detach();
   delay(500);
@@ -296,39 +231,11 @@ mq_begin_status_t Adafruit_Marquee::begin() {
     return _begin_status;
   }
 
-  DeserializationError error = deserializeJson(_cfg_doc, cfg);
-  cfg.close();
-  if (error) {
-    _begin_status = ERR_JSON_DESERIALIZATION;
+  if (parseDisplayCfg(cfg) != SUCCESS) {
     return _begin_status;
   }
 
-  JsonObject display = _cfg_doc["display"];
-  const char *display_panel = display["panel"];
-  _rotation = display["rotation"] | 0;
-
-  const char *display_mode = display["mode"];
-  if (!parseThinkInkMode(display_mode)) {
-    _begin_status = ERR_TI_MODE_UNSUPPORTED;
-    return _begin_status;
-  }
-
-  // Attempt to parse SPI interface
-  JsonObject interface = _cfg_doc["interface"];
-  const char *interface_type = interface["type"];
-  if (!interface_type || (strcmp(interface_type, "spi_epd") != 0 &&
-                          strcmp(interface_type, "builtin") != 0)) {
-    _begin_status = ERR_IFACE_UNSUPPORTED;
-    return _begin_status;
-  }
-
-  JsonObject pins = interface["pins"];
-  _pin_cs = pins["cs"] | -1;
-  _pin_dc = pins["dc"] | -1;
-  _pin_rst = pins["reset"] | -1;
-  _pin_busy = pins["busy"] | -1;
-  _pin_sram_cs = pins["sram_cs"] | -1;
-
+  const char *display_panel = _cfg_doc["display"]["panel"];
   if (!createEPD(display_panel)) {
     _begin_status = ERR_EPD_PANEL_UNSUPPORTED;
     return _begin_status;
@@ -341,7 +248,13 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   _height = _display->height();
   _width = _display->width();
   _display->clearBuffer();
-  // TODO: If we didn't boot from sleep, we should call display->display() to clear it
+  // An EPD holds its last image with the power off, so a cold boot comes up
+  // showing whatever was on the panel beforehand - push the cleared buffer out
+  // to wipe it. A wake from sleep is resuming the image we deliberately left
+  // up, so skip the refresh there and let run() redraw only on a new bitmap.
+  if (!didWakeFromSleep()) {
+    _display->display();
+  }
 
   // Parse network and Adafruit IO credentials
   _ssid = _cfg_doc["network"]["wifi_ssid"];
@@ -439,6 +352,12 @@ bool Adafruit_Marquee::initMqtt() {
   }
   _sub_sleep->setCallback(cbSleepMsg);
 
+  // Build status feed (publish only)
+  snprintf(_feed_name_status, sizeof(_feed_name_status), "%s.status",
+           _device_name);
+  snprintf(_topic_status, sizeof(_topic_status), "%s/f/%s", _aio_username,
+           _feed_name_status);
+
   // Attempt to register subscriptions
   if (!_mqtt->subscribe(_sub_bmp) || !_mqtt->subscribe(_sub_sleep)) {
     MQ_DEBUG_PRINTLN("Failed to register MQTT subscriptions");
@@ -449,6 +368,8 @@ bool Adafruit_Marquee::initMqtt() {
   MQ_DEBUG_PRINTLN(_topic_bmp);
   MQ_DEBUG_PRINT("Subscribed to sleep feed: ");
   MQ_DEBUG_PRINTLN(_topic_sleep);
+  MQ_DEBUG_PRINT("Publishing status to: ");
+  MQ_DEBUG_PRINTLN(_topic_status);
   return true;
 }
 
@@ -463,12 +384,9 @@ bool Adafruit_Marquee::initWifi(unsigned long timeout) {
     return false;
   }
 
+  // Attempt to connect to WiFi
   MQ_DEBUG_PRINTF("[wifi] connecting to '%s'\n", _ssid);
   _connect();
-
-  // Association usually completes in a second or two. Poll for it rather than
-  // blocking out the whole timeout: on a deep-sleep duty cycle the difference
-  // is ~28s of radio-on time that the device pays for on every single wake.
   unsigned long start = millis();
   while (!networkConnected() && millis() - start < timeout) {
     delay(MQ_WIFI_POLL_MS);
@@ -491,15 +409,36 @@ bool Adafruit_Marquee::initWifi(unsigned long timeout) {
 bool Adafruit_Marquee::connectMqtt() {
   _last_mqtt_attempt = millis();
   int8_t rc = _mqtt->connect();
-  if (rc == 0) {
-    _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
-    return true;
+  _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
+  if (rc != 0) {
+    MQ_DEBUG_PRINT("[mqtt] connect failed: ");
+    MQ_DEBUG_PRINTLN(_mqtt->connectErrorString(rc));
+    return false;
   }
 
-  MQ_DEBUG_PRINT("[mqtt] connect failed: ");
-  MQ_DEBUG_PRINTLN(_mqtt->connectErrorString(rc));
-  _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
-  return false;
+  // Publish to the status feed that the device is awake + why it is awake
+  JsonDocument doc;
+  doc["state"] = "awake";
+  doc["wake_reason"] = wakeupReason();
+  char payload[128];
+  size_t len = serializeJson(doc, payload, sizeof(payload));
+  if (len == 0 || len >= sizeof(payload)) {
+    MQ_DEBUG_PRINTLN("[status] ERROR: could not serialize the awake payload");
+  } else {
+    publishStatus(payload);
+  }
+
+  // Ask for IO to republish the last data point on the bitmap feed
+  getFromFeed(_feed_name_bmp);
+
+#ifdef ARDUINO_ARCH_ESP32
+  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_UNDEFINED) {
+    MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep, pulling the sleep feed");
+    getFromFeed(_feed_name_sleep);
+  }
+#endif // ARDUINO_ARCH_ESP32
+
+  return true;
 }
 
 /*!
@@ -517,34 +456,80 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
     return false;
   }
 
-  if (!connectMqtt()) {
+  // connectMqtt() also asks the feeds to republish, so there is nothing left
+  // for this function to do once the session is up.
+  return connectMqtt();
+}
+
+/*!
+    @brief  Asks a feed to republish its last data point.
+    @param  feed_name  Feed key to poke, e.g. _feed_name_bmp.
+*/
+void Adafruit_Marquee::getFromFeed(const char *feed_name) {
+  if (!_mqtt || !_aio_username || !feed_name || feed_name[0] == '\0') {
+    MQ_DEBUG_PRINTLN("[mqtt] ERROR: cannot request a feed, MQTT not ready");
+    return;
+  }
+  char topic[sizeof(_topic_bmp)];
+  snprintf(topic, sizeof(topic), "%s/f/%s/csv/get", _aio_username, feed_name);
+  Adafruit_MQTT_Publish pub_get(_mqtt, topic);
+  pub_get.publish("\0");
+}
+
+/*!
+    @brief  Publishes a payload to the device's status feed.
+    @param  payload  The message to publish.
+    @return True if the publish succeeded, False otherwise.
+*/
+bool Adafruit_Marquee::publishStatus(const char *payload) {
+  if (!_mqtt || _topic_status[0] == '\0') {
+    MQ_DEBUG_PRINTLN("[status] ERROR: cannot publish, MQTT not ready");
+    return false;
+  }
+  if (!_mqtt->connected()) {
+    MQ_DEBUG_PRINTLN("[status] ERROR: cannot publish, MQTT not connected");
     return false;
   }
 
-  // TODO: Determine why the device woke up and publish it to the status feed (call print_wakeup_reason() or let it return?)
-  // TODO: status feed looks like snprintf(_feed_name_status, sizeof(_feed_name_status), "%s.status", _device_name);
-  // TODO: Publish to the status feed something like: {"state": "awake", "wake_reason": Wake_reason_variable}
-  
+  Adafruit_MQTT_Publish pub_status(_mqtt, _topic_status);
+  if (!pub_status.publish(payload)) {
+    MQ_DEBUG_PRINTLN("[status] ERROR: publish failed");
+    return false;
+  }
 
-  // Force the bitmap feed to publish its last data point
-  getBitmapFromFeed();
-
+  MQ_DEBUG_PRINT("[status] published -> ");
+  MQ_DEBUG_PRINTLN(payload);
   return true;
 }
 
 /*!
-    @brief  Requests the bitmap feed to publish its last data point.
+    @brief  Reads the CRC32 of the bitmap drawn to the panel (prior to sleep)
+    @param  crc  If this library returns True, set to the CRC32 of the b64 payload.
+    @return True if a CRC was successfully stored, False otherwise.
 */
-void Adafruit_Marquee::getBitmapFromFeed() {
-  if (!_mqtt || !_aio_username || !_feed_name_bmp) {
-    MQ_DEBUG_PRINTLN("[bmp] ERROR: cannot request bitmap feed, MQTT not ready");
-    return;
-  }
-  char topic[sizeof(_topic_bmp)];
-  snprintf(topic, sizeof(topic), "%s/f/%s/csv/get", _aio_username, _feed_name_bmp);
-  Adafruit_MQTT_Publish pub_get(_mqtt, topic);
-  pub_get.publish("\0");
+bool Adafruit_Marquee::loadPrvBmpCRC(uint32_t &crc) {
+#ifdef ARDUINO_ARCH_ESP32
+  if (prvBmpCrc == 0)
+    return false;
+  crc = prvBmpCrc;
+  return true;
+#else
+  return false;
+#endif // ARDUINO_ARCH_ESP32
 }
+
+/*!
+    @brief  Records the CRC32 of the bitmap drawn to the panel.
+    @param  crc  CRC32 of the base64 payload that produced the bitmap.
+*/
+void Adafruit_Marquee::storeBmpCRC(uint32_t crc) {
+#ifdef ARDUINO_ARCH_ESP32
+  prvBmpCrc = crc;
+#else
+  (void)crc;
+#endif // ARDUINO_ARCH_ESP32
+}
+
 
 /*!
     @brief  Draws the bitmap queued by the bitmap feed callback, if any.
@@ -552,18 +537,12 @@ void Adafruit_Marquee::getBitmapFromFeed() {
 void Adafruit_Marquee::drawBitmap() {
   if (!_pending_bmp || !_display)
     return;
-
-  // TODO CRC: Calculate bitmap's CRC
-  // TODO CRC: Check bitmap's CRC against the previous one in RTC_DATA_ATTR 
-
+  // Clear the display buffer before drawing the new bitmap
   _display->clearBuffer();
-
   uint32_t t_decode_start = millis();
   ImageReturnCode rc =
-      _reader.drawBMP(_pending_bmp, _pending_len, *_display, 0, 0);
+      _reader.drawBMP(_pending_bmp, _pending_bmp_len, *_display, 0, 0);
   uint32_t t_decode = millis() - t_decode_start;
-  (void)t_decode; // only read by the debug print below
-
   if (rc != IMAGE_SUCCESS) {
     MQ_DEBUG_PRINTF("[display] ERROR: drawBMP rc: %d\n", (int)rc);
   } else {
@@ -572,12 +551,13 @@ void Adafruit_Marquee::drawBitmap() {
     (void)t_refresh_start;
     MQ_DEBUG_PRINTF("[display] decode ms: %u refresh ms: %u\n",
                     (unsigned)t_decode, (unsigned)(millis() - t_refresh_start));
+    storeBmpCRC(_pending_crc);
   }
 
   // Free the bitmap buffer and clear flags
   free(_pending_bmp);
   _pending_bmp = nullptr;
-  _pending_len = 0;
+  _pending_bmp_len = 0;
 }
 
 /*!
@@ -631,6 +611,101 @@ void Adafruit_Marquee::run() {
   drawBitmap();
   // Sleep, if the sleep feed asked for it. On deep sleep this does not return.
   handleSleep();
+}
+
+
+/*!
+    @brief  Callback for bitmap feed messages. Forwards the payload to the
+            instance registered by initMqtt().
+    @param  data  The message payload: a base64-encoded BMP. Adafruit_MQTT
+                  nul-terminates this, so it can be treated as a C string.
+    @param  len   Payload length, in bytes.
+*/
+void Adafruit_Marquee::cbBitmapMsg(char *data, uint16_t len) {
+  if (!_instance || !data || len == 0)
+    return;
+  _instance->decodeb64Bmp(data, len);
+}
+
+/*!
+    @brief  Callback for sleep feed messages, parses and stores the sleep feed's JSON data into the class instance.
+    @param  data  The message payload.
+    @param  len   Payload length, in bytes.
+*/
+void Adafruit_Marquee::cbSleepMsg(char *data, uint16_t len) {
+  if (!_instance || !data || len == 0)
+    return;
+  MQ_DEBUG_PRINT("Sleep feed received <- ");
+  MQ_DEBUG_PRINTLN(data);
+
+  // Parse and store the sleep feed JSON in the class' instance
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, data, len);
+  if (error) {
+    MQ_DEBUG_PRINTLN("Sleep feed JSON parse failed");
+    return;
+  }
+
+  if (doc["alarm_type"] == "timer") {
+    _instance->_sleep_alarm = SLEEP_ALARM_TIMER;
+  } else {
+    _instance->_sleep_alarm = SLEEP_ALARM_NONE;
+  }
+
+  if (doc["sleep_mode"] == "deep") {
+    _instance->_sleep_mode = SLEEP_MODE_DEEP;
+  } else if (doc["sleep_mode"] == "light") {
+    _instance->_sleep_mode = SLEEP_MODE_LIGHT;
+  } else {
+    _instance->_sleep_mode = SLEEP_MODE_NONE;
+  }
+  _instance->_sleep_time = doc["sleep_time"] | 60;
+
+  _instance->_is_sleep_pending = true;
+}
+
+/*!
+    @brief  Deserializes the Marquee config file and parses out the display
+            and display interface configuration.
+    @param  cfg  The opened Marquee config file. Closed before returning.
+    @return SUCCESS if the display configuration was parsed, otherwise the
+            mq_begin_status_t describing the failure.
+*/
+mq_begin_status_t Adafruit_Marquee::parseDisplayCfg(File32 &cfg) {
+  DeserializationError error = deserializeJson(_cfg_doc, cfg);
+  cfg.close();
+  if (error) {
+    _begin_status = ERR_JSON_DESERIALIZATION;
+    return _begin_status;
+  }
+
+  JsonObject display = _cfg_doc["display"];
+  _rotation = display["rotation"] | 0;
+
+  const char *display_mode = display["mode"];
+  if (!parseThinkInkMode(display_mode)) {
+    _begin_status = ERR_TI_MODE_UNSUPPORTED;
+    return _begin_status;
+  }
+
+  // Attempt to parse SPI interface
+  JsonObject interface = _cfg_doc["interface"];
+  const char *interface_type = interface["type"];
+  if (!interface_type || (strcmp(interface_type, "spi_epd") != 0 &&
+                          strcmp(interface_type, "builtin") != 0)) {
+    _begin_status = ERR_IFACE_UNSUPPORTED;
+    return _begin_status;
+  }
+
+  JsonObject pins = interface["pins"];
+  _pin_cs = pins["cs"] | -1;
+  _pin_dc = pins["dc"] | -1;
+  _pin_rst = pins["reset"] | -1;
+  _pin_busy = pins["busy"] | -1;
+  _pin_sram_cs = pins["sram_cs"] | -1;
+
+  _begin_status = SUCCESS;
+  return _begin_status;
 }
 
 /*!
@@ -702,6 +777,16 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
     return false;
   }
 
+  // Calculate the CRC of the payload 
+  uint32_t crc = calcCRC32((const uint8_t *)b64, b64_len);
+  // Compare the payload's CRC to the last drawn bitmap's CRC
+  uint32_t prv_crc;
+  if (loadPrvBmpCRC(prv_crc) && prv_crc == crc) {
+    MQ_DEBUG_PRINTF("[bmp] unchanged (crc 0x%08lX), skipping redraw\n",
+                    (unsigned long)crc);
+    return true;
+  }
+
   // First, decode the payload's length without allocating a buffer
   size_t decoded_len =
       decode_base64_length((const unsigned char *)b64, (unsigned int)b64_len);
@@ -738,7 +823,8 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
     free(_pending_bmp);
   }
   _pending_bmp = buf;
-  _pending_len = decoded_len;
+  _pending_bmp_len = decoded_len;
+  _pending_crc = crc;
 
   MQ_DEBUG_PRINTF("[bmp] queued: %u b64 chars -> %u bytes\n", (unsigned)b64_len,
                   (unsigned)decoded_len);
@@ -749,41 +835,44 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
 #ifdef ARDUINO_ARCH_ESP32
 
 /*!
-    @brief  Logs why the chip came out of its last sleep.
+    @brief  Returns why the ESP32 woke from its previous sleep.
+    @return The wakeup reason
 */
-void Adafruit_Marquee::printWakeupReason() {
+const char *Adafruit_Marquee::wakeupReason() {
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
   switch (wakeup_reason) {
   case ESP_SLEEP_WAKEUP_EXT0:
-    MQ_DEBUG_PRINTLN("[sleep] woke on external signal (RTC_IO)");
-    break;
+    return "ext0"; // external signal (RTC_IO)
   case ESP_SLEEP_WAKEUP_EXT1:
-    MQ_DEBUG_PRINTLN("[sleep] woke on external signal (RTC_CNTL)");
-    break;
+    return "ext1"; // external signal (RTC_CNTL)
   case ESP_SLEEP_WAKEUP_TIMER:
-    MQ_DEBUG_PRINTLN("[sleep] woke on timer");
-    break;
+    return "timer";
   case ESP_SLEEP_WAKEUP_TOUCHPAD:
-    MQ_DEBUG_PRINTLN("[sleep] woke on touchpad");
-    break;
+    return "touchpad";
   case ESP_SLEEP_WAKEUP_ULP:
-    MQ_DEBUG_PRINTLN("[sleep] woke on ULP program");
-    break;
+    return "ulp";
   case ESP_SLEEP_WAKEUP_GPIO:
-    MQ_DEBUG_PRINTLN("[sleep] woke on GPIO");
-    break;
+    return "gpio";
   case ESP_SLEEP_WAKEUP_UART:
-    MQ_DEBUG_PRINTLN("[sleep] woke on UART");
-    break;
+    return "uart";
   case ESP_SLEEP_WAKEUP_UNDEFINED:
-    MQ_DEBUG_PRINTLN("[sleep] cold boot, not a wake from sleep");
-    break;
+    return "cold_boot"; // not a wake from sleep
   default:
     MQ_DEBUG_PRINTF("[sleep] woke for an unhandled reason: %d\n",
                     (int)wakeup_reason);
-    break;
+    return "unknown";
   }
+}
+
+/*!
+    @brief  Reports whether this boot is a wake from sleep rather than a
+            power-on or reset boot.
+    @return True if the chip woke from a sleep wakeup source, False otherwise.
+*/
+bool Adafruit_Marquee::didWakeFromSleep() {
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  return wakeup_reason != ESP_SLEEP_WAKEUP_UNDEFINED;
 }
 
 /*!
@@ -811,6 +900,21 @@ void Adafruit_Marquee::disconnectBeforeSleep() {
   TinyUSBDevice.detach();
   delay(10);
 }
+
+#else // !ARDUINO_ARCH_ESP32
+
+/*!
+    @brief  Returns why the chip came out of its last sleep.
+    @return "unknown", always.
+*/
+const char *Adafruit_Marquee::wakeupReason() { return "unknown"; }
+
+/*!
+    @brief  Whether this boot is a wake from sleep rather than a cold-boot.
+    @return False, always.
+*/
+bool Adafruit_Marquee::didWakeFromSleep() { return false; }
+
 #endif // ARDUINO_ARCH_ESP32
 
 /*!
@@ -818,33 +922,50 @@ void Adafruit_Marquee::disconnectBeforeSleep() {
             sleep this does not return; the chip resets on wake.
 */
 void Adafruit_Marquee::handleSleep() {
-  if (!_sleep_pending) {
+  if (!_is_sleep_pending) {
     return;
   }
 
 #ifdef ARDUINO_ARCH_ESP32
   if (_sleep_mode != SLEEP_MODE_DEEP && _sleep_mode != SLEEP_MODE_LIGHT) {
     MQ_DEBUG_PRINTLN("[sleep] ERROR: unsupported sleep mode, staying awake!");
-    _sleep_pending = false;
+    _is_sleep_pending = false;
     return;
   }
 
   // NOTE/TODO: _sleep_alarm is parsed but not used yet. We only support wake from timer.
-  if (!enableTimerWakeup(_sleep_duration)) {
+  if (!enableTimerWakeup(_sleep_time)) {
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-    _sleep_pending = false;
+    _is_sleep_pending = false;
     return;
+  }
+
+  // Publish the sleeping status to the status feed before entering sleep
+  JsonDocument doc;
+  doc["state"] = "sleeping";
+  doc["sleep_time"] = _sleep_time;
+  doc["alarm_type"] = (_sleep_alarm == SLEEP_ALARM_TIMER) ? "timer" : "none";
+
+  char payload[128];
+  size_t len = serializeJson(doc, payload, sizeof(payload));
+  if (len == 0 || len >= sizeof(payload)) {
+    // Announcing the sleep is informational, so a payload that will not
+    // serialize is no reason to stay awake and burn battery.
+    MQ_DEBUG_PRINTLN(
+        "[status] ERROR: could not serialize the sleeping payload");
+  } else {
+    publishStatus(payload);
   }
 
   switch (_sleep_mode) {
   case SLEEP_MODE_DEEP: {
-    MQ_DEBUG_PRINTF("[sleep] entering deep sleep for %llu s\n", (unsigned long long)_sleep_duration);
+    MQ_DEBUG_PRINTF("[sleep] entering deep sleep for %llu s\n", (unsigned long long)_sleep_time);
     disconnectBeforeSleep();
     esp_deep_sleep_start();
     break; // Not reached: the chip resets on wake.
   }
   case SLEEP_MODE_LIGHT: {
-    MQ_DEBUG_PRINTF("[sleep] entering light sleep for %llu s\n", (unsigned long long)_sleep_duration);
+    MQ_DEBUG_PRINTF("[sleep] entering light sleep for %llu s\n", (unsigned long long)_sleep_time);
     disconnectBeforeSleep();
     esp_err_t rc = esp_light_sleep_start();
 
@@ -856,21 +977,25 @@ void Adafruit_Marquee::handleSleep() {
       MQ_DEBUG_PRINTF("[sleep] ERROR: could not enter light sleep: %d\n",
                       (int)rc);
       esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-      _sleep_pending = false;
+      _is_sleep_pending = false;
       return;
     }
 
-    printWakeupReason();
+    MQ_DEBUG_PRINTF("[sleep] wake reason: %s\n", wakeupReason());
 
     // Reconnect network on the next handleConnection() call
     _last_mqtt_attempt = millis() - _mqtt_retry_ms;
     _last_ping = millis();
     break;
   }
+  case SLEEP_MODE_NONE:
+  default:
+    MQ_DEBUG_PRINTLN("[sleep] ERROR: unsupported sleep mode, staying awake!");
+    break;
   }
 #else
   MQ_DEBUG_PRINTLN("[sleep] ERROR: sleep is not implemented for this platform");
 #endif // ARDUINO_ARCH_ESP32
 
-  _sleep_pending = false;
+  _is_sleep_pending = false;
 }
