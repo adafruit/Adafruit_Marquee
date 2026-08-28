@@ -22,6 +22,7 @@
 #include <Adafruit_MQTT_Client.h>
 #include <Adafruit_ThinkInk.h>
 #include <ArduinoJson.h>
+#include <CRC.h>
 #include <functional>
 #include <map>
 
@@ -32,6 +33,7 @@
 #define MQ_DEBUG_PRINT(...) Serial.print(__VA_ARGS__)     ///< Debug, no newline
 #define MQ_DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__) ///< Debug + newline
 #define MQ_DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)   ///< Formatted debug
+#define MQ_DEBUG_FLUSH() Serial.flush()                   ///< Drain the TX FIFO
 #else
 #define MQ_DEBUG_PRINT(...)                                                    \
   do {                                                                         \
@@ -40,6 +42,9 @@
   do {                                                                         \
   } while (0) ///< Disabled
 #define MQ_DEBUG_PRINTF(...)                                                   \
+  do {                                                                         \
+  } while (0) ///< Disabled
+#define MQ_DEBUG_FLUSH()                                                       \
   do {                                                                         \
   } while (0) ///< Disabled
 #endif
@@ -61,6 +66,8 @@
   5000 ///< Minimum wait between WiFi association attempts, in milliseconds.
 #define MQ_MQTT_RETRY_MS                                                       \
   10000 ///< Minimum wait between MQTT connect attempts, in milliseconds.
+#define MQ_WIFI_POLL_MS                                                        \
+  3000 ///< How often to re-check for an association while connecting, in ms.
 
 typedef enum {
   SUCCESS = 0,
@@ -171,6 +178,7 @@ protected:
   char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>/csv
   static void cbBitmapMsg(char *data, uint16_t len);
   static void cbSleepMsg(char *data, uint16_t len);
+  void getBitmapFromFeed();
 
   // Network interface within networking/
   virtual void _connect() = 0;
@@ -182,6 +190,14 @@ protected:
   mq_sleep_mode_t _sleep_mode; ///< Sleep mode
   mq_sleep_alarm_t _sleep_alarm; ///< Sleep alarm type
   uint64_t _sleep_duration; ///< Sleep duration, in seconds
+
+private:
+#ifdef ARDUINO_ARCH_ESP32
+  void printWakeupReason();
+  bool enableTimerWakeup(uint64_t wakeup_time_sec);
+  void disconnectBeforeSleep();
+  void resumeFromSleep();
+#endif
 };
 
 #endif // ADAFRUIT_MARQUEE_H

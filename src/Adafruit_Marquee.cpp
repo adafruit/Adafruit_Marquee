@@ -18,6 +18,16 @@
 #include "Adafruit_Marquee.h"
 #include <base64.hpp>
 
+#ifdef ARDUINO_ARCH_ESP32
+// esp_sleep.h already arrives via Arduino.h -> esp32-hal.h, but the sleep path
+// depends on it directly, so name it here rather than lean on that chain.
+#include <esp_sleep.h>
+// Light sleep needs the WiFi driver in a power-save mode it can coordinate
+// with. Going through the IDF call rather than WiFi.setSleep() keeps this file
+// free of the Arduino WiFi class, which lives behind the networking/ adapter.
+#include <esp_wifi.h>
+#endif // ARDUINO_ARCH_ESP32
+
 // for flashTransport definition
 #define ADAFRUIT_MARQUEE_INTERNAL
 #include "flash_config.h"
@@ -36,6 +46,10 @@ static FatFile file;
 
 // USB Mass Storage object
 static Adafruit_USBD_MSC usb_msc;
+
+#ifdef ARDUINO_ARCH_ESP32
+//static RTC_DATA_ATTR bool s_slept_deep = false;
+#endif // ARDUINO_ARCH_ESP32
 
 // Check if flash is formatted
 bool Adafruit_Marquee::fs_formatted;
@@ -152,7 +166,7 @@ void Adafruit_Marquee::cbBitmapMsg(char *data, uint16_t len) {
     @param  len   Payload length, in bytes.
 */
 void Adafruit_Marquee::cbSleepMsg(char *data, uint16_t len) {
-  if (!data || len == 0)
+  if (!_instance || !data || len == 0)
     return;
   MQ_DEBUG_PRINT("Sleep feed received <- ");
   MQ_DEBUG_PRINTLN(data);
@@ -179,7 +193,8 @@ void Adafruit_Marquee::cbSleepMsg(char *data, uint16_t len) {
     _instance->_sleep_mode = SLEEP_MODE_NONE;
   }
 
-  _instance->_sleep_duration = doc["duration"] | 0;
+  // Default to 60 seconds if not specified to avoid rapid sleep/wake cycling
+  _instance->_sleep_duration = doc["duration"] | 60;
 
   // Set the flag to process within the loop 
   _instance->_sleep_pending = true;
@@ -326,10 +341,7 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   _height = _display->height();
   _width = _display->width();
   _display->clearBuffer();
-  // TODO: Only fully refresh/clear the EPD on a cold-boot, not when it wakes
-  // from sleep
-  /*     if (!didBootFromSleep())
-        _display->display(); */
+  // TODO: If we didn't boot from sleep, we should call display->display() to clear it
 
   // Parse network and Adafruit IO credentials
   _ssid = _cfg_doc["network"]["wifi_ssid"];
@@ -453,7 +465,14 @@ bool Adafruit_Marquee::initWifi(unsigned long timeout) {
 
   MQ_DEBUG_PRINTF("[wifi] connecting to '%s'\n", _ssid);
   _connect();
-  delay(timeout);
+
+  // Association usually completes in a second or two. Poll for it rather than
+  // blocking out the whole timeout: on a deep-sleep duty cycle the difference
+  // is ~28s of radio-on time that the device pays for on every single wake.
+  unsigned long start = millis();
+  while (!networkConnected() && millis() - start < timeout) {
+    delay(MQ_WIFI_POLL_MS);
+  }
   _last_wifi_attempt = millis();
 
   if (!networkConnected()) {
@@ -502,14 +521,29 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
     return false;
   }
 
+  // TODO: Determine why the device woke up and publish it to the status feed (call print_wakeup_reason() or let it return?)
+  // TODO: status feed looks like snprintf(_feed_name_status, sizeof(_feed_name_status), "%s.status", _device_name);
+  // TODO: Publish to the status feed something like: {"state": "awake", "wake_reason": Wake_reason_variable}
+  
+
   // Force the bitmap feed to publish its last data point
-  char topic[sizeof(_topic_bmp)];
-  snprintf(topic, sizeof(topic), "%s/f/%s/csv/get", _aio_username,
-           _feed_name_bmp);
-  Adafruit_MQTT_Publish pub_get(_mqtt, topic);
-  pub_get.publish("\0");
+  getBitmapFromFeed();
 
   return true;
+}
+
+/*!
+    @brief  Requests the bitmap feed to publish its last data point.
+*/
+void Adafruit_Marquee::getBitmapFromFeed() {
+  if (!_mqtt || !_aio_username || !_feed_name_bmp) {
+    MQ_DEBUG_PRINTLN("[bmp] ERROR: cannot request bitmap feed, MQTT not ready");
+    return;
+  }
+  char topic[sizeof(_topic_bmp)];
+  snprintf(topic, sizeof(topic), "%s/f/%s/csv/get", _aio_username, _feed_name_bmp);
+  Adafruit_MQTT_Publish pub_get(_mqtt, topic);
+  pub_get.publish("\0");
 }
 
 /*!
@@ -518,6 +552,9 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
 void Adafruit_Marquee::drawBitmap() {
   if (!_pending_bmp || !_display)
     return;
+
+  // TODO CRC: Calculate bitmap's CRC
+  // TODO CRC: Check bitmap's CRC against the previous one in RTC_DATA_ATTR 
 
   _display->clearBuffer();
 
@@ -592,7 +629,7 @@ void Adafruit_Marquee::run() {
 
   // Draw any bitmap queued by the bitmap feed callback
   drawBitmap();
-  // TODO: Handle sleep feed messages
+  // Sleep, if the sleep feed asked for it. On deep sleep this does not return.
   handleSleep();
 }
 
@@ -708,70 +745,132 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
   return true;
 }
 
-// Sleep API 
+// Sleep API
 #ifdef ARDUINO_ARCH_ESP32
-void print_wakeup_reason() {
-  esp_sleep_wakeup_cause_t wakeup_reason;
-  wakeup_reason = esp_sleep_get_wakeup_cause();
+
+/*!
+    @brief  Logs why the chip came out of its last sleep.
+*/
+void Adafruit_Marquee::printWakeupReason() {
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
   switch (wakeup_reason) {
-    case ESP_SLEEP_WAKEUP_EXT0:     Serial.println("Wakeup caused by external signal using RTC_IO"); break;
-    case ESP_SLEEP_WAKEUP_EXT1:     Serial.println("Wakeup caused by external signal using RTC_CNTL"); break;
-    case ESP_SLEEP_WAKEUP_TIMER:    Serial.println("Wakeup caused by timer"); break;
-    case ESP_SLEEP_WAKEUP_TOUCHPAD: Serial.println("Wakeup caused by touchpad"); break;
-    case ESP_SLEEP_WAKEUP_ULP:      Serial.println("Wakeup caused by ULP program"); break;
-    default:                        Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason); break;
+  case ESP_SLEEP_WAKEUP_EXT0:
+    MQ_DEBUG_PRINTLN("[sleep] woke on external signal (RTC_IO)");
+    break;
+  case ESP_SLEEP_WAKEUP_EXT1:
+    MQ_DEBUG_PRINTLN("[sleep] woke on external signal (RTC_CNTL)");
+    break;
+  case ESP_SLEEP_WAKEUP_TIMER:
+    MQ_DEBUG_PRINTLN("[sleep] woke on timer");
+    break;
+  case ESP_SLEEP_WAKEUP_TOUCHPAD:
+    MQ_DEBUG_PRINTLN("[sleep] woke on touchpad");
+    break;
+  case ESP_SLEEP_WAKEUP_ULP:
+    MQ_DEBUG_PRINTLN("[sleep] woke on ULP program");
+    break;
+  case ESP_SLEEP_WAKEUP_GPIO:
+    MQ_DEBUG_PRINTLN("[sleep] woke on GPIO");
+    break;
+  case ESP_SLEEP_WAKEUP_UART:
+    MQ_DEBUG_PRINTLN("[sleep] woke on UART");
+    break;
+  case ESP_SLEEP_WAKEUP_UNDEFINED:
+    MQ_DEBUG_PRINTLN("[sleep] cold boot, not a wake from sleep");
+    break;
+  default:
+    MQ_DEBUG_PRINTF("[sleep] woke for an unhandled reason: %d\n",
+                    (int)wakeup_reason);
+    break;
   }
 }
 
 /*!
     @brief  Enables the ESP32 timer wakeup source.
-    @param  wakeup_time_sec  The number of seconds to wait before waking up.
-    @return True if the timer wakeup was successfully enabled, False if wakeup time is out of range
+    @param  wakeup_time_sec  Expected number of seconds to wait before waking up.
+    @return True if the timer wakeup was successfully enabled, False otherwise.
 */
-bool enableTimerWakeup(uint64_t wakeup_time_sec) {
+bool Adafruit_Marquee::enableTimerWakeup(uint64_t wakeup_time_sec) {
   esp_err_t err = esp_sleep_enable_timer_wakeup(wakeup_time_sec * 1000000ULL);
   if (err != ESP_OK) {
-    Serial.printf("Failed to enable timer wakeup: %d\n", err);
+    MQ_DEBUG_PRINTF("[sleep] ERROR: could not enable timer wakeup: %d\n",
+                    (int)err);
     return false;
   }
   return true;
 }
-#endif // ARDUINO_ARCH_ESP32
-
 
 /*!
-    @brief  Handles sleep feed messages
+    @brief  Tears down MQTT session and USB before entering sleep.
+*/
+void Adafruit_Marquee::disconnectBeforeSleep() {
+  flash.syncDevice();
+  _mqtt->disconnect();
+  MQ_DEBUG_FLUSH();
+  TinyUSBDevice.detach();
+  delay(10);
+}
+#endif // ARDUINO_ARCH_ESP32
+
+/*!
+    @brief  Acts on a sleep request queued by the sleep feed callback. On deep
+            sleep this does not return; the chip resets on wake.
 */
 void Adafruit_Marquee::handleSleep() {
   if (!_sleep_pending) {
     return;
   }
 
-  // Attempt to set the sleep timer
-  // NOTE/TODO: We aren't parsing the sleep alarm type (_sleep_alarm) here yet, but can
-  if (!enableTimerWakeup(_sleep_duration)) {
-    MQ_DEBUG_PRINTLN("[sleep] ERROR: Failed to enable timer wakeup");
+#ifdef ARDUINO_ARCH_ESP32
+  if (_sleep_mode != SLEEP_MODE_DEEP && _sleep_mode != SLEEP_MODE_LIGHT) {
+    MQ_DEBUG_PRINTLN("[sleep] ERROR: unsupported sleep mode, staying awake!");
     _sleep_pending = false;
     return;
   }
 
-  // Handle sleep based on the stored sleep mode and duration
-  switch (_sleep_mode) {
-    case SLEEP_MODE_DEEP:
-      MQ_DEBUG_PRINTLN("[sleep] Entering deep sleep mode");
-      esp_deep_sleep_start();
-      break; // NOTE: This is never reached
-    case SLEEP_MODE_LIGHT:
-      // TODO: Implement light sleep logic here
-      break;
-    default:
-      MQ_DEBUG_PRINTLN("[sleep] ERROR: Unsupported sleep mode");
-      _sleep_pending = false;
-      break;
+  // NOTE/TODO: _sleep_alarm is parsed but not used yet. We only support wake from timer.
+  if (!enableTimerWakeup(_sleep_duration)) {
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+    _sleep_pending = false;
+    return;
   }
 
-  // Clear the sleep pending flag
+  switch (_sleep_mode) {
+  case SLEEP_MODE_DEEP: {
+    MQ_DEBUG_PRINTF("[sleep] entering deep sleep for %llu s\n", (unsigned long long)_sleep_duration);
+    disconnectBeforeSleep();
+    esp_deep_sleep_start();
+    break; // Not reached: the chip resets on wake.
+  }
+  case SLEEP_MODE_LIGHT: {
+    MQ_DEBUG_PRINTF("[sleep] entering light sleep for %llu s\n", (unsigned long long)_sleep_duration);
+    disconnectBeforeSleep();
+    esp_err_t rc = esp_light_sleep_start();
+
+    // Re-enumerate USB
+    TinyUSBDevice.attach();
+    delay(500);
+
+    if (rc != ESP_OK) {
+      MQ_DEBUG_PRINTF("[sleep] ERROR: could not enter light sleep: %d\n",
+                      (int)rc);
+      esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+      _sleep_pending = false;
+      return;
+    }
+
+    printWakeupReason();
+
+    // Reconnect network on the next handleConnection() call
+    _last_mqtt_attempt = millis() - _mqtt_retry_ms;
+    _last_ping = millis();
+    break;
+  }
+  }
+#else
+  MQ_DEBUG_PRINTLN("[sleep] ERROR: sleep is not implemented for this platform");
+#endif // ARDUINO_ARCH_ESP32
+
   _sleep_pending = false;
 }
-
