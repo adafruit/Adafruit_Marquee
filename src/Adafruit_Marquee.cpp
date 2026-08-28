@@ -388,12 +388,12 @@ bool Adafruit_Marquee::initWifi(unsigned long timeout) {
   MQ_DEBUG_PRINTF("[wifi] connecting to '%s'\n", _ssid);
   _connect();
   unsigned long start = millis();
-  while (!networkConnected() && millis() - start < timeout) {
+  while (!isNetConnected() && millis() - start < timeout) {
     delay(MQ_WIFI_POLL_MS);
   }
   _last_wifi_attempt = millis();
 
-  if (!networkConnected()) {
+  if (!isNetConnected()) {
     MQ_DEBUG_PRINTLN("[wifi] ERROR: timed out, could not connect to WiFi network");
     return false;
   }
@@ -431,12 +431,10 @@ bool Adafruit_Marquee::connectMqtt() {
   // Ask for IO to republish the last data point on the bitmap feed
   getFromFeed(_feed_name_bmp);
 
-#ifdef ARDUINO_ARCH_ESP32
-  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_UNDEFINED) {
+  if (didWakeFromSleep()) {
     MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep, pulling the sleep feed");
     getFromFeed(_feed_name_sleep);
   }
-#endif // ARDUINO_ARCH_ESP32
 
   return true;
 }
@@ -567,7 +565,7 @@ void Adafruit_Marquee::handleConnection() {
   if (!_mqtt)
     return;
   // Is the WiFi network still connected?
-  if (!networkConnected()) {
+  if (!isNetConnected()) {
     if (millis() - _last_wifi_attempt >= MQ_WIFI_RETRY_MS) {
       MQ_DEBUG_PRINTLN("[wifi] disconnected, re-associating");
       _last_wifi_attempt = millis();
@@ -957,14 +955,13 @@ void Adafruit_Marquee::handleSleep() {
     publishStatus(payload);
   }
 
-  switch (_sleep_mode) {
-  case SLEEP_MODE_DEEP: {
+  if (_sleep_mode == SLEEP_MODE_DEEP) {
     MQ_DEBUG_PRINTF("[sleep] entering deep sleep for %llu s\n", (unsigned long long)_sleep_time);
     disconnectBeforeSleep();
     esp_deep_sleep_start();
-    break; // Not reached: the chip resets on wake.
-  }
-  case SLEEP_MODE_LIGHT: {
+    // Not reached: the chip resets on wake.
+  } else {
+    // The guard above leaves light sleep as the only remaining mode.
     MQ_DEBUG_PRINTF("[sleep] entering light sleep for %llu s\n", (unsigned long long)_sleep_time);
     disconnectBeforeSleep();
     esp_err_t rc = esp_light_sleep_start();
@@ -986,12 +983,6 @@ void Adafruit_Marquee::handleSleep() {
     // Reconnect network on the next handleConnection() call
     _last_mqtt_attempt = millis() - _mqtt_retry_ms;
     _last_ping = millis();
-    break;
-  }
-  case SLEEP_MODE_NONE:
-  default:
-    MQ_DEBUG_PRINTLN("[sleep] ERROR: unsupported sleep mode, staying awake!");
-    break;
   }
 #else
   MQ_DEBUG_PRINTLN("[sleep] ERROR: sleep is not implemented for this platform");

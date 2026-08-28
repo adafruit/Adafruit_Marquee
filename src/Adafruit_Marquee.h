@@ -102,11 +102,9 @@ public:
   void run();
 
   // Platform-specific networking interface
-  virtual bool
-  networkConnected() = 0;          ///< Returns true if the network interface is
-                                   ///< connected to a network, False otherwise
-  virtual int networkStatus() = 0; ///< Returns a platform-specific status code
-                                   ///< for the network interface
+  virtual bool isNetConnected() = 0; ///< Returns true if the network interface
+                                     ///< is connected to a network, False
+                                     ///< otherwise
   virtual const char *
   connectionType() = 0; ///< Returns a string describing the network interface
                         ///< type (e.g. "WiFi", "Ethernet", "BLE")

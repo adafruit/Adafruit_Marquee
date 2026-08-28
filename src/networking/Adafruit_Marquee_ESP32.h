@@ -44,13 +44,7 @@ public:
       @brief  Whether the station holds an association.
       @return True if associated, else False.
   */
-  bool networkConnected() { return WiFi.status() == WL_CONNECTED; }
-
-  /*!
-      @brief  Returns the network status of an ESP32 module.
-      @return The platform's status enum, as an int.
-  */
-  int networkStatus() { return (int)WiFi.status(); }
+  bool isNetConnected() { return WiFi.status() == WL_CONNECTED; }
 
   /*!
       @brief  Returns the type of network connection used by Marquee.
