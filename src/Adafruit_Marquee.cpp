@@ -431,8 +431,9 @@ bool Adafruit_Marquee::connectMqtt() {
   // Ask for IO to republish the last data point on the bitmap feed
   getFromFeed(_topic_bmp);
 
+  // If we're waking from sleep, the device needs to know how it'll enter sleep again
   if (didWakeFromSleep()) {
-    MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep, pulling the sleep feed");
+    MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep!");
     getFromFeed(_topic_sleep);
   }
 
@@ -482,21 +483,21 @@ void Adafruit_Marquee::getFromFeed(const char *topic) {
 */
 bool Adafruit_Marquee::publishStatus(const char *payload) {
   if (!_mqtt || _topic_status[0] == '\0') {
-    MQ_DEBUG_PRINTLN("[status] ERROR: cannot publish, MQTT not ready");
+    MQ_DEBUG_PRINTLN("[status] ERROR: Cannot publish, MQTT not ready");
     return false;
   }
   if (!_mqtt->connected()) {
-    MQ_DEBUG_PRINTLN("[status] ERROR: cannot publish, MQTT not connected");
+    MQ_DEBUG_PRINTLN("[status] ERROR: Cannot publish, MQTT not connected");
     return false;
   }
 
   Adafruit_MQTT_Publish pub_status(_mqtt, _topic_status);
   if (!pub_status.publish(payload)) {
-    MQ_DEBUG_PRINTLN("[status] ERROR: publish failed");
+    MQ_DEBUG_PRINTLN("[status] ERROR: Publish failed");
     return false;
   }
 
-  MQ_DEBUG_PRINT("[status] published -> ");
+  MQ_DEBUG_PRINT("[status] PUBLISHED -> ");
   MQ_DEBUG_PRINTLN(payload);
   return true;
 }
@@ -536,6 +537,7 @@ void Adafruit_Marquee::storeBmpCRC(uint32_t crc) {
 void Adafruit_Marquee::drawBitmap() {
   if (!_pending_bmp || !_display)
     return;
+  MQ_DEBUG_PRINT("[display] Drawing to the panel...");
   // Clear the display buffer before drawing the new bitmap
   _display->clearBuffer();
   uint32_t t_decode_start = millis();
@@ -557,6 +559,7 @@ void Adafruit_Marquee::drawBitmap() {
   free(_pending_bmp);
   _pending_bmp = nullptr;
   _pending_bmp_len = 0;
+  MQ_DEBUG_PRINTLN("[display] Draw complete!");
 }
 
 /*!
@@ -825,8 +828,7 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
   _pending_bmp_len = decoded_len;
   _pending_crc = crc;
 
-  MQ_DEBUG_PRINTF("[bmp] queued: %u b64 chars -> %u bytes\n", (unsigned)b64_len,
-                  (unsigned)decoded_len);
+  MQ_DEBUG_PRINTF("[bmp] decoded %u bytes, queued for draw\n", (unsigned)decoded_len);
   return true;
 }
 
