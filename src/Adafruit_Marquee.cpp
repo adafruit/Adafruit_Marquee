@@ -343,7 +343,7 @@ bool Adafruit_Marquee::initMqtt() {
 
   snprintf(_feed_name_sleep, sizeof(_feed_name_sleep), "%s.sleep",
            _device_name);
-  snprintf(_topic_sleep, sizeof(_topic_sleep), "%s/f/%s/csv", _aio_username,
+  snprintf(_topic_sleep, sizeof(_topic_sleep), "%s/f/%s", _aio_username,
            _feed_name_sleep);
   _sub_sleep = new Adafruit_MQTT_Subscribe(_mqtt, _topic_sleep);
   if (!_sub_sleep) {
@@ -429,11 +429,11 @@ bool Adafruit_Marquee::connectMqtt() {
   }
 
   // Ask for IO to republish the last data point on the bitmap feed
-  getFromFeed(_feed_name_bmp);
+  getFromFeed(_topic_bmp);
 
   if (didWakeFromSleep()) {
     MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep, pulling the sleep feed");
-    getFromFeed(_feed_name_sleep);
+    getFromFeed(_topic_sleep);
   }
 
   return true;
@@ -461,16 +461,17 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
 
 /*!
     @brief  Asks a feed to republish its last data point.
-    @param  feed_name  Feed key to poke, e.g. _feed_name_bmp.
+    @param  topic  Subscribed topic to republish from.
 */
-void Adafruit_Marquee::getFromFeed(const char *feed_name) {
-  if (!_mqtt || !_aio_username || !feed_name || feed_name[0] == '\0') {
-    MQ_DEBUG_PRINTLN("[mqtt] ERROR: cannot request a feed, MQTT not ready");
+void Adafruit_Marquee::getFromFeed(const char *topic) {
+  if (!_mqtt || !topic || topic[0] == '\0') {
     return;
   }
-  char topic[sizeof(_topic_bmp)];
-  snprintf(topic, sizeof(topic), "%s/f/%s/csv/get", _aio_username, feed_name);
-  Adafruit_MQTT_Publish pub_get(_mqtt, topic);
+
+  // Ask the feed to republish its last stored data point
+  char get_topic[sizeof(_topic_bmp) + 8];
+  snprintf(get_topic, sizeof(get_topic), "%s/get", topic);
+  Adafruit_MQTT_Publish pub_get(_mqtt, get_topic);
   pub_get.publish("\0");
 }
 
@@ -640,7 +641,8 @@ void Adafruit_Marquee::cbSleepMsg(char *data, uint16_t len) {
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, data, len);
   if (error) {
-    MQ_DEBUG_PRINTLN("Sleep feed JSON parse failed");
+    MQ_DEBUG_PRINT("Sleep feed JSON parse failed");
+    MQ_DEBUG_PRINTLN(error.c_str());
     return;
   }
 
@@ -658,7 +660,6 @@ void Adafruit_Marquee::cbSleepMsg(char *data, uint16_t len) {
     _instance->_sleep_mode = SLEEP_MODE_NONE;
   }
   _instance->_sleep_time = doc["sleep_time"] | 60;
-
   _instance->_is_sleep_pending = true;
 }
 
@@ -955,15 +956,16 @@ void Adafruit_Marquee::handleSleep() {
     publishStatus(payload);
   }
 
+  MQ_DEBUG_PRINTLN("[sleep] Disconnecting MQTT and USB before entering sleep");
+  disconnectBeforeSleep();
+
   if (_sleep_mode == SLEEP_MODE_DEEP) {
     MQ_DEBUG_PRINTF("[sleep] entering deep sleep for %llu s\n", (unsigned long long)_sleep_time);
-    disconnectBeforeSleep();
     esp_deep_sleep_start();
     // Not reached: the chip resets on wake.
   } else {
     // The guard above leaves light sleep as the only remaining mode.
     MQ_DEBUG_PRINTF("[sleep] entering light sleep for %llu s\n", (unsigned long long)_sleep_time);
-    disconnectBeforeSleep();
     esp_err_t rc = esp_light_sleep_start();
 
     // Re-enumerate USB

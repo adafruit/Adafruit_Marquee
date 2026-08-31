@@ -174,14 +174,14 @@ protected:
   char _feed_name_bmp[MAX_IO_FEED_NAME_LEN];   ///< Feed key for the bitmap feed
   char _feed_name_sleep[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the sleep feed
   char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];  ///< <user>/f/<feed>/csv
-  char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>/csv
+  char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>
   char _feed_name_status[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the status
                                                 ///< feed
   char _topic_status[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>, no /csv:
                                                  ///< the payload is JSON
   static void cbBitmapMsg(char *data, uint16_t len);
   static void cbSleepMsg(char *data, uint16_t len);
-  void getFromFeed(const char *feed_name);
+  void getFromFeed(const char *topic);
   bool publishStatus(const char *payload);
 
   // Network interface within networking/
