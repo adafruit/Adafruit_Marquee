@@ -92,11 +92,6 @@ using Adafruit_EPDFactory = std::map<std::string, FnCreateAdafruit_EPD>;
 
 /*!
     @brief  Config panel identifier to Adafruit_EPD factory table.
-
-    Keys are the `display.panel` values accepted in marquee-cfg.json and are
-    matched verbatim, so adding support for a panel means adding one entry
-    here. The identifiers follow the `<size>-<mode>-<suffix>` shape of the
-    corresponding ThinkInk class name, with the mode lowercased.
     @return A reference to the factory map.
 */
 static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
@@ -151,6 +146,8 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
   _sub_bmp = nullptr;
   _sub_sleep = nullptr;
+  _awaiting_bmp = false;
+  _awaiting_sleep = false;
   _pending_bmp = nullptr;
   _pending_bmp_len = 0;
   _pending_crc = 0;
@@ -264,7 +261,7 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   _device_name = _cfg_doc["name"];
   // Validate
   if (!_ssid || !_pass || !_aio_username || !_aio_key || !_device_name) {
-    _begin_status = ERR_JSON_DESERIALIZATION;
+    _begin_status = ERR_INVALID_CREDS;
     return _begin_status;
   }
 
@@ -428,12 +425,16 @@ bool Adafruit_Marquee::connectMqtt() {
     publishStatus(payload);
   }
 
-  // Ask for IO to republish the last data point on the bitmap feed
+  // Ask for IO to republish the last data point on the bitmap feed. handleSleep()
+  // holds a queued sleep until this reply lands, otherwise the small sleep
+  // payload beats the ~21KB bitmap to the device and the panel never updates.
+  _awaiting_bmp = true;
   getFromFeed(_topic_bmp);
 
   // If we're waking from sleep, the device needs to know how it'll enter sleep again
   if (didWakeFromSleep()) {
     MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep!");
+    _awaiting_sleep = true;
     getFromFeed(_topic_sleep);
   }
 
@@ -548,7 +549,10 @@ void Adafruit_Marquee::drawBitmap() {
     MQ_DEBUG_PRINTF("[display] ERROR: drawBMP rc: %d\n", (int)rc);
   } else {
     uint32_t t_refresh_start = millis();
-    _display->display();
+    // display(true) powers the panel down after the refresh. Without it the
+    // SSD1680 never gets its DEEP_SLEEP command and keeps drawing current
+    // while the ESP32 sleeps. powerUp() hardware-resets before the next draw.
+    _display->display(true);
     (void)t_refresh_start;
     MQ_DEBUG_PRINTF("[display] decode ms: %u refresh ms: %u\n",
                     (unsigned)t_decode, (unsigned)(millis() - t_refresh_start));
@@ -623,9 +627,13 @@ void Adafruit_Marquee::run() {
                   nul-terminates this, so it can be treated as a C string.
     @param  len   Payload length, in bytes.
 */
-void Adafruit_Marquee::cbBitmapMsg(char *data, uint16_t len) {
-  if (!_instance || !data || len == 0)
+void Adafruit_Marquee::cbBitmapMsg(char *data, uint32_t len) {
+  if (!_instance)
     return;
+  if (!data || len == 0)
+    return;
+
+  // Process the bitmap message
   _instance->decodeb64Bmp(data, len);
 }
 
@@ -634,8 +642,11 @@ void Adafruit_Marquee::cbBitmapMsg(char *data, uint16_t len) {
     @param  data  The message payload.
     @param  len   Payload length, in bytes.
 */
-void Adafruit_Marquee::cbSleepMsg(char *data, uint16_t len) {
-  if (!_instance || !data || len == 0)
+void Adafruit_Marquee::cbSleepMsg(char *data, uint32_t len) {
+  if (!_instance)
+    return;
+  _instance->_awaiting_sleep = false;
+  if (!data || len == 0)
     return;
   MQ_DEBUG_PRINT("Sleep feed received <- ");
   MQ_DEBUG_PRINTLN(data);
@@ -725,9 +736,6 @@ bool Adafruit_Marquee::createEPD(const char *panel) {
   const Adafruit_EPDFactory &adafruitEPDFactory = getAdafruitEPDFactory();
   Adafruit_EPDFactory::const_iterator it = adafruitEPDFactory.find(panel);
   if (it == adafruitEPDFactory.end()) {
-    for (Adafruit_EPDFactory::const_iterator k = adafruitEPDFactory.begin();
-         k != adafruitEPDFactory.end(); ++k) {
-    }
     return false;
   }
 
@@ -750,15 +758,15 @@ bool Adafruit_Marquee::parseThinkInkMode(const char *mode) {
   if (!mode)
     return false;
 
-  if (strcmp(mode, "THINKINK_MONO") == 0) {
+  if (strcmp(mode, "mono") == 0) {
     _thinkInkMode = THINKINK_MONO;
-  } else if (strcmp(mode, "THINKINK_TRICOLOR") == 0) {
+  } else if (strcmp(mode, "tricolor") == 0) {
     _thinkInkMode = THINKINK_TRICOLOR;
-  } else if (strcmp(mode, "THINKINK_GRAYSCALE4") == 0) {
+  } else if (strcmp(mode, "grayscale4") == 0) {
     _thinkInkMode = THINKINK_GRAYSCALE4;
-  } else if (strcmp(mode, "THINKINK_MONO_PARTIAL") == 0) {
+  } else if (strcmp(mode, "mono_partial") == 0) {
     _thinkInkMode = THINKINK_MONO_PARTIAL;
-  } else if (strcmp(mode, "THINKINK_QUADCOLOR") == 0) {
+  } else if (strcmp(mode, "quadcolor") == 0) {
     _thinkInkMode = THINKINK_QUADCOLOR;
   } else {
     return false;
@@ -829,6 +837,8 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
   _pending_crc = crc;
 
   MQ_DEBUG_PRINTF("[bmp] decoded %u bytes, queued for draw\n", (unsigned)decoded_len);
+  // clear awaiting flag
+  _awaiting_bmp = false;
   return true;
 }
 
@@ -924,6 +934,12 @@ bool Adafruit_Marquee::didWakeFromSleep() { return false; }
 */
 void Adafruit_Marquee::handleSleep() {
   if (!_is_sleep_pending) {
+    return;
+  }
+
+  // Do not enter sleep until the bitmap message has been received and drawn
+  if (_awaiting_bmp || _awaiting_sleep) {
+    MQ_DEBUG_PRINTLN("[sleep] Holding off sleep until bitmap has been received");
     return;
   }
 

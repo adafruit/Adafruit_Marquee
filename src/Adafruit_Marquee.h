@@ -171,6 +171,10 @@ protected:
                                      ///< connection, in milliseconds
   Adafruit_MQTT_Subscribe *_sub_bmp; ///< Subscription for the bitmap topic
   Adafruit_MQTT_Subscribe *_sub_sleep; ///< Subscription for the sleep topic
+  bool _awaiting_bmp;   ///< True while this session's bitmap feed /get is still
+                        ///< unanswered
+  bool _awaiting_sleep; ///< True while this session's sleep feed /get is still
+                        ///< unanswered
   char _feed_name_bmp[MAX_IO_FEED_NAME_LEN];   ///< Feed key for the bitmap feed
   char _feed_name_sleep[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the sleep feed
   char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];  ///< <user>/f/<feed>/csv
@@ -179,8 +183,8 @@ protected:
                                                 ///< feed
   char _topic_status[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>, no /csv:
                                                  ///< the payload is JSON
-  static void cbBitmapMsg(char *data, uint16_t len);
-  static void cbSleepMsg(char *data, uint16_t len);
+  static void cbBitmapMsg(char *data, uint32_t len);
+  static void cbSleepMsg(char *data, uint32_t len);
   void getFromFeed(const char *topic);
   bool publishStatus(const char *payload);
 
