@@ -461,12 +461,13 @@ bool Adafruit_Marquee::connectMqtt() {
   _awaiting_bmp = true;
   getFromFeed(_topic_bmp);
 
-  // If we're waking from sleep, the device needs to know how it'll enter sleep again
   if (didWakeFromSleep()) {
     MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep!");
-    _awaiting_sleep = true;
-    getFromFeed(_topic_sleep);
   }
+
+  // Allow a cold boot with a sleep config from a feed to enter sleep after drawing
+  _awaiting_sleep = true;
+  getFromFeed(_topic_sleep);
 
   return true;
 }
