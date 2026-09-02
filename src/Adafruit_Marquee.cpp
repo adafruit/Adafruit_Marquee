@@ -580,9 +580,6 @@ void Adafruit_Marquee::drawBitmap() {
     MQ_DEBUG_PRINTF("[display] ERROR: drawBMP rc: %d\n", (int)rc);
   } else {
     uint32_t t_refresh_start = millis();
-    // display(true) powers the panel down after the refresh. Without it the
-    // SSD1680 never gets its DEEP_SLEEP command and keeps drawing current
-    // while the ESP32 sleeps. powerUp() hardware-resets before the next draw.
     _display->display(true);
     (void)t_refresh_start;
     MQ_DEBUG_PRINTF("[display] decode ms: %u refresh ms: %u\n",
@@ -661,6 +658,7 @@ void Adafruit_Marquee::run() {
 void Adafruit_Marquee::cbBitmapMsg(char *data, uint32_t len) {
   if (!_instance)
     return;
+  _instance->_awaiting_bmp = false;
   if (!data || len == 0)
     return;
 
@@ -875,8 +873,6 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
   _pending_crc = crc;
 
   MQ_DEBUG_PRINTF("[bmp] decoded %u bytes, queued for draw\n", (unsigned)decoded_len);
-  // clear awaiting flag
-  _awaiting_bmp = false;
   return true;
 }
 
