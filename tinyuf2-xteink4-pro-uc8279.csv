@@ -1,0 +1,34 @@
+# ESP-IDF Partition Table
+# Xteink X4 Pro (ESP32-S3, 16MB flash) - UC8279 800x480 panel
+#
+# Derived from framework-arduinoespressif32 tools/partitions/tinyuf2-partitions-4MB.csv,
+# scaled to 16MB. Two things are load-bearing:
+#
+#  1. nvs stays at 0x9000 / 0x5000, byte-identical to the OEM layout. The factory
+#     records the panel controller in the OEM namespace "hw_calib", key
+#     "screenType" (u8): 1/0x0B -> UC8179, 2/0x0C -> UC8279, else SSD1677. That
+#     key survives a normal upload with this table, but NOT an
+#     `esptool erase_flash`.
+#  2. The ffat partition is why this file exists. Adafruit_FlashTransport_ESP32
+#     locates the filesystem with esp_partition_find_first(DATA, SUBTYPE_DATA_FAT),
+#     so Adafruit_Marquee's flash.begin() fails outright on any table that only
+#     ships a spiffs/littlefs partition - including the stock default_16MB.csv.
+#     This is where /cfg-marquee.json lives and what the host sees over USB MSC.
+#
+# The uf2 slot is reserved, not programmed: the X4 Pro ships an OEM bootloader,
+# not TinyUF2. It is kept so the offsets stay compatible if TinyUF2 is ever
+# ported to this board. Recovery is the ROM bootloader (hold GPIO0 / the Left
+# nav key through a power cycle), or the 'b' / both-nav-keys escape hatch.
+#
+# App partitions align to 0x10000, data partitions to 0x1000.
+#
+# Name,   Type, SubType, Offset,  Size, Flags
+# bootloader.bin,,          0x1000, 32K
+# partition table,          0x8000, 4K
+
+nvs,      data, nvs,      0x9000,    20K,
+otadata,  data, ota,      0xe000,     8K,
+ota_0,    app,  ota_0,   0x10000,  4096K,
+ota_1,    app,  ota_1,  0x410000,  4096K,
+uf2,      app,  factory,0x810000,   256K,
+ffat,     data, fat,    0x850000,  7872K,

@@ -129,6 +129,11 @@ protected:
   bool initMqtt();
   void handleConnection();
 
+  // Board-specific power rails
+#if defined(MARQUEE_BOARD_XTEINK_X4_PRO)
+  void marqueeBoardPowerUp();
+#endif
+
   // ThinkInk panel API
   mq_begin_status_t parseDisplayCfg(File32 &cfg);
   bool createEPD(const char *panel);
@@ -143,6 +148,9 @@ protected:
   int16_t _pin_rst;                 ///< Reset pin for EPD
   int16_t _pin_busy;                ///< Busy pin for EPD
   int16_t _pin_sram_cs;             ///< SRAM chip select pin for EPD
+  int16_t _pin_sclk;                ///< SPI clock pin
+  int16_t _pin_mosi;                ///< SPI MOSI pin
+  int16_t _pin_miso;                ///< SPI MISO pin
   uint8_t _rotation;                ///< Display rotation (0-3)
   int16_t _width;                   ///< Panel width in pixels, post-rotation
   int16_t _height;                  ///< Panel height in pixels, post-rotation

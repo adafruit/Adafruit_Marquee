@@ -128,6 +128,13 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
          d->begin(mode);
          return d;
        }},
+       {"xteink-x4-pro",
+            [](int16_t dc, int16_t rst, int16_t cs, int16_t sram_cs, int16_t busy,
+             SPIClass *spi, thinkinkmode_t mode) -> Adafruit_EPD * {
+            auto *d = new Adafruit_UC8279(800, 480, dc, rst, cs, sram_cs, busy, spi);
+            d->begin(mode);
+            return d;
+       }}
   };
   return adafruitEPDFactory;
 }
@@ -163,6 +170,9 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _pin_rst = -1;
   _pin_busy = -1;
   _pin_sram_cs = -1;
+  _pin_sclk = -1;
+  _pin_mosi = -1;
+  _pin_miso = -1;
   _rotation = 0;
   _width = 0;
   _height = 0;
@@ -200,12 +210,32 @@ Adafruit_Marquee::~Adafruit_Marquee() {
   }
 }
 
+#if defined(MARQUEE_BOARD_XTEINK_X4_PRO)
+/*!
+ * @brief Brings up the XTeink X4 Pro's peripheral rails, required for EPD bringup.
+ */
+void Adafruit_Marquee::marqueeBoardPowerUp() {
+  // Turn on the main peripheral power
+  pinMode(1, OUTPUT);
+  digitalWrite(1, HIGH);
+  delay(50);
+
+  // Turn off the SD card power (active-low) so we can use the EPD
+  pinMode(5, OUTPUT);
+  digitalWrite(5, HIGH);
+}
+#endif // MARQUEE_BOARD_XTEINK_X4_PRO
+
 /*!
  * @brief Initializes the Marquee client.
  * @returns SUCCESS if initialization succeeded, otherwise the
  *          mq_begin_status_t describing the failure.
  */
 mq_begin_status_t Adafruit_Marquee::begin() {
+#if defined(MARQUEE_BOARD_XTEINK_X4_PRO)
+  marqueeBoardPowerUp();
+#endif
+
   // Detach USB *before* touching the flash, mirroring Wippersnapper_FS
   TinyUSBDevice.detach();
   delay(500);
@@ -539,7 +569,8 @@ void Adafruit_Marquee::drawBitmap() {
   if (!_pending_bmp || !_display)
     return;
   MQ_DEBUG_PRINT("[display] Drawing to the panel...");
-  // Clear the display buffer before drawing the new bitmap
+  // Clear the display buffer before drawing the new bitmap. This only touches
+  // the RAM framebuffer; nothing reaches the panel until display() is called.
   _display->clearBuffer();
   uint32_t t_decode_start = millis();
   ImageReturnCode rc =
@@ -716,6 +747,9 @@ mq_begin_status_t Adafruit_Marquee::parseDisplayCfg(File32 &cfg) {
   _pin_rst = pins["reset"] | -1;
   _pin_busy = pins["busy"] | -1;
   _pin_sram_cs = pins["sram_cs"] | -1;
+  _pin_sclk = pins["sclk"] | -1;
+  _pin_mosi = pins["mosi"] | -1;
+  _pin_miso = pins["miso"] | -1;
 
   _begin_status = SUCCESS;
   return _begin_status;
@@ -739,6 +773,10 @@ bool Adafruit_Marquee::createEPD(const char *panel) {
     return false;
   }
 
+  // If the board doesn't use the default SPI pins, re-map the bus to the pins in the config file
+  if (_pin_sclk >= 0 || _pin_mosi >= 0) {
+    SPI.begin(_pin_sclk, _pin_miso, _pin_mosi, /*ss=*/-1);
+  }
   // Creates the panel instance using the factory function
   _display = it->second(_pin_dc, _pin_rst, _pin_cs, _pin_sram_cs, _pin_busy,
                         &SPI, _thinkInkMode);
