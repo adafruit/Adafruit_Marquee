@@ -1,0 +1,29 @@
+[
+  {
+    "target_name": "magtag",
+    "setup_cmd": "pip install --upgrade platformio && git clone --depth 1 -b fix/widen-uint16_t https://github.com/brentru/Adafruit_MQTT_Library.git ../Adafruit_MQTT_Library && git clone --depth 1 -b add-driver-uc8279 https://github.com/brentru/Adafruit_EPD.git ../Adafruit_EPD",
+    "build_cmd": "pio run -e magtag && cp \"$(find $HOME/.platformio/packages -path '*esp32s2/ld/memory.ld' -print -quit)\" .pio/build/magtag/memory.ld",
+    "elf": ".pio/build/magtag/firmware.elf",
+    "ld": ".pio/build/magtag/memory.ld",
+    "map_file": ".pio/build/magtag/firmware.map",
+    "linker_vars": ""
+  },
+  {
+    "target_name": "adafruit_feather_esp32s3",
+    "setup_cmd": "pip install --upgrade platformio && git clone --depth 1 -b fix/widen-uint16_t https://github.com/brentru/Adafruit_MQTT_Library.git ../Adafruit_MQTT_Library && git clone --depth 1 -b add-driver-uc8279 https://github.com/brentru/Adafruit_EPD.git ../Adafruit_EPD",
+    "build_cmd": "pio run -e adafruit_feather_esp32s3 && cp \"$(find $HOME/.platformio/packages -path '*esp32s3/ld/memory.ld' -print -quit)\" .pio/build/adafruit_feather_esp32s3/memory.ld",
+    "elf": ".pio/build/adafruit_feather_esp32s3/firmware.elf",
+    "ld": ".pio/build/adafruit_feather_esp32s3/memory.ld",
+    "map_file": ".pio/build/adafruit_feather_esp32s3/firmware.map",
+    "linker_vars": ""
+  },
+  {
+    "target_name": "x4pro",
+    "setup_cmd": "pip install --upgrade platformio && git clone --depth 1 -b fix/widen-uint16_t https://github.com/brentru/Adafruit_MQTT_Library.git ../Adafruit_MQTT_Library && git clone --depth 1 -b add-driver-uc8279 https://github.com/brentru/Adafruit_EPD.git ../Adafruit_EPD",
+    "build_cmd": "pio run -e x4pro && cp \"$(find $HOME/.platformio/packages -path '*esp32s3/ld/memory.ld' -print -quit)\" .pio/build/x4pro/memory.ld",
+    "elf": ".pio/build/x4pro/firmware.elf",
+    "ld": ".pio/build/x4pro/memory.ld",
+    "map_file": ".pio/build/x4pro/firmware.map",
+    "linker_vars": ""
+  }
+]
