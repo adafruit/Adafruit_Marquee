@@ -997,14 +997,6 @@ void Adafruit_Marquee::handleSleep() {
     return;
   }
 
-  // NOTE/TODO: _sleep_alarm is parsed but not used yet. We only support wake
-  // from timer.
-  if (!enableTimerWakeup(_sleep_time)) {
-    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-    _is_sleep_pending = false;
-    return;
-  }
-
   // Publish the sleeping status to the status feed before entering sleep
   JsonDocument doc;
   doc["state"] = "sleeping";
@@ -1014,26 +1006,31 @@ void Adafruit_Marquee::handleSleep() {
   char payload[128];
   size_t len = serializeJson(doc, payload, sizeof(payload));
   if (len == 0 || len >= sizeof(payload)) {
-    // Announcing the sleep is informational, so a payload that will not
-    // serialize is no reason to stay awake and burn battery.
-    MQ_DEBUG_PRINTLN(
-        "[status] ERROR: could not serialize the sleeping payload");
+    MQ_DEBUG_PRINTLN("[sleep] ERROR: could not serialize the status payload");
   } else {
     publishStatus(payload);
+    MQ_DEBUG_PRINTLN("[sleep] published status to feed");
   }
 
-  MQ_DEBUG_PRINTLN("[sleep] Disconnecting MQTT and USB before entering sleep");
-  disconnectBeforeSleep();
+  // NOTE/TODO: _sleep_alarm is parsed but not used yet. We only support wake
+  // from timer.
+  if (!enableTimerWakeup(_sleep_time)) {
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+    _is_sleep_pending = false;
+    return;
+  }
 
   if (_sleep_mode == SLEEP_MODE_DEEP) {
     MQ_DEBUG_PRINTF("[sleep] entering deep sleep for %llu s\n",
                     (unsigned long long)_sleep_time);
+    disconnectBeforeSleep();
     esp_deep_sleep_start();
     // Not reached: the chip resets on wake.
   } else {
     // The guard above leaves light sleep as the only remaining mode.
     MQ_DEBUG_PRINTF("[sleep] entering light sleep for %llu s\n",
                     (unsigned long long)_sleep_time);
+    disconnectBeforeSleep();
     esp_err_t rc = esp_light_sleep_start();
 
     // Re-enumerate USB
