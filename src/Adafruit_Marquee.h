@@ -155,7 +155,7 @@ protected:
   int16_t _width;                   ///< Panel width in pixels, post-rotation
   int16_t _height;                  ///< Panel height in pixels, post-rotation
   uint8_t *_pending_bmp;            ///< Decoded BMP bytes, or nullptr
-  size_t _pending_bmp_len;              ///< Byte length of _pending_bmp
+  size_t _pending_bmp_len;          ///< Byte length of _pending_bmp
   uint32_t _pending_crc; ///< CRC32 of the base64 payload behind _pending_bmp
 
   // Networking
@@ -186,9 +186,9 @@ protected:
   char _feed_name_bmp[MAX_IO_FEED_NAME_LEN];   ///< Feed key for the bitmap feed
   char _feed_name_sleep[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the sleep feed
   char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];  ///< <user>/f/<feed>/csv
-  char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>
-  char _feed_name_status[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the status
-                                                ///< feed
+  char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96];  ///< <user>/f/<feed>
+  char _feed_name_status[MAX_IO_FEED_NAME_LEN];  ///< Feed key for the status
+                                                 ///< feed
   char _topic_status[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>, no /csv:
                                                  ///< the payload is JSON
   static void cbBitmapMsg(char *data, size_t len);
@@ -202,10 +202,11 @@ protected:
 
   // Sleep API
   void handleSleep();
-  bool _is_sleep_pending; ///< True if a sleep request is pending, False otherwise
-  mq_sleep_mode_t _sleep_mode; ///< Sleep mode
+  bool _is_sleep_pending;        ///< True if a sleep request is pending, False
+                                 ///< otherwise
+  mq_sleep_mode_t _sleep_mode;   ///< Sleep mode
   mq_sleep_alarm_t _sleep_alarm; ///< Sleep alarm type
-  uint64_t _sleep_time; ///< Sleep duration, in seconds
+  uint64_t _sleep_time;          ///< Sleep duration, in seconds
 
 private:
   bool loadPrvBmpCRC(uint32_t &crc);

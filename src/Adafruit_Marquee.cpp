@@ -16,17 +16,19 @@
  * MIT license, all text here must be included in any redistribution.
  */
 #include "Adafruit_Marquee.h"
-#include <base64.hpp>
 #include <CRC.h>
+#include <base64.hpp>
 
-Adafruit_Marquee *Adafruit_Marquee::_instance = nullptr; ///< Pointer to the instance that the MQTT callbacks dispatch to
+Adafruit_Marquee *Adafruit_Marquee::_instance =
+    nullptr; ///< Pointer to the instance that the MQTT callbacks dispatch to
 
 // For ESP32 sleep modes
 #ifdef ARDUINO_ARCH_ESP32
 #include <esp_sleep.h>
 #include <esp_wifi.h>
-static RTC_DATA_ATTR uint32_t prvBmpCrc; ///< CRC32 of the bitmap, stored before sleep
-#endif // ARDUINO_ARCH_ESP32
+static RTC_DATA_ATTR uint32_t
+    prvBmpCrc; ///< CRC32 of the bitmap, stored before sleep
+#endif         // ARDUINO_ARCH_ESP32
 
 // for flashTransport definition
 #define ADAFRUIT_MARQUEE_INTERNAL
@@ -46,10 +48,11 @@ static FatFile file;
 
 static Adafruit_USBD_MSC usb_msc; ///< USB Mass Storage device object
 
-
-
-bool Adafruit_Marquee::fs_formatted; ///< True when the filesystem is formatted, False otherwise
-volatile bool Adafruit_Marquee::fs_changed; ///< True when the filesystem is changed by the host over USB MSC, False otherwise
+bool Adafruit_Marquee::fs_formatted; ///< True when the filesystem is formatted,
+                                     ///< False otherwise
+volatile bool
+    Adafruit_Marquee::fs_changed; ///< True when the filesystem is changed by
+                                  ///< the host over USB MSC, False otherwise
 
 // Callback invoked when received READ10 command.
 // Copy disk's data to buffer (up to bufsize) and
@@ -128,14 +131,14 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
          d->begin(mode);
          return d;
        }},
-       {"xteink-x4-pro",
-            [](int16_t dc, int16_t rst, int16_t cs, int16_t sram_cs, int16_t busy,
-             SPIClass *spi, thinkinkmode_t mode) -> Adafruit_EPD * {
-            auto *d = new Adafruit_UC8279(800, 480, dc, rst, cs, sram_cs, busy, spi);
-            d->begin(mode);
-            return d;
-       }}
-  };
+      {"xteink-x4-pro",
+       [](int16_t dc, int16_t rst, int16_t cs, int16_t sram_cs, int16_t busy,
+          SPIClass *spi, thinkinkmode_t mode) -> Adafruit_EPD * {
+         auto *d =
+             new Adafruit_UC8279(800, 480, dc, rst, cs, sram_cs, busy, spi);
+         d->begin(mode);
+         return d;
+       }}};
   return adafruitEPDFactory;
 }
 
@@ -212,7 +215,8 @@ Adafruit_Marquee::~Adafruit_Marquee() {
 
 #if defined(MARQUEE_BOARD_XTEINK_X4_PRO)
 /*!
- * @brief Brings up the XTeink X4 Pro's peripheral rails, required for EPD bringup.
+ * @brief Brings up the XTeink X4 Pro's peripheral rails, required for EPD
+ * bringup.
  */
 void Adafruit_Marquee::marqueeBoardPowerUp() {
   // Turn on the main peripheral power
@@ -361,7 +365,8 @@ bool Adafruit_Marquee::initMqtt() {
   snprintf(_feed_name_bmp, sizeof(_feed_name_bmp), "%s.bitmap", _device_name);
   snprintf(_topic_bmp, sizeof(_topic_bmp), "%s/f/%s/csv", _aio_username,
            _feed_name_bmp);
-  _sub_bmp = new Adafruit_MQTT_Subscribe(_mqtt, _topic_bmp, 0, MQ_BITMAP_SUB_LEN);
+  _sub_bmp =
+      new Adafruit_MQTT_Subscribe(_mqtt, _topic_bmp, 0, MQ_BITMAP_SUB_LEN);
   if (!_sub_bmp || !_sub_bmp->lastread) {
     MQ_DEBUG_PRINTLN("[bmp] ERROR: Couldn't create the bitmap feed");
     return false;
@@ -421,7 +426,8 @@ bool Adafruit_Marquee::initWifi(unsigned long timeout) {
   _last_wifi_attempt = millis();
 
   if (!isNetConnected()) {
-    MQ_DEBUG_PRINTLN("[wifi] ERROR: timed out, could not connect to WiFi network");
+    MQ_DEBUG_PRINTLN(
+        "[wifi] ERROR: timed out, could not connect to WiFi network");
     return false;
   }
 
@@ -455,9 +461,10 @@ bool Adafruit_Marquee::connectMqtt() {
     publishStatus(payload);
   }
 
-  // Ask for IO to republish the last data point on the bitmap feed. handleSleep()
-  // holds a queued sleep until this reply lands, otherwise the small sleep
-  // payload beats the ~21KB bitmap to the device and the panel never updates.
+  // Ask for IO to republish the last data point on the bitmap feed.
+  // handleSleep() holds a queued sleep until this reply lands, otherwise the
+  // small sleep payload beats the ~21KB bitmap to the device and the panel
+  // never updates.
   _awaiting_bmp = true;
   getFromFeed(_topic_bmp);
 
@@ -465,7 +472,8 @@ bool Adafruit_Marquee::connectMqtt() {
     MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep!");
   }
 
-  // Allow a cold boot with a sleep config from a feed to enter sleep after drawing
+  // Allow a cold boot with a sleep config from a feed to enter sleep after
+  // drawing
   _awaiting_sleep = true;
   getFromFeed(_topic_sleep);
 
@@ -536,7 +544,8 @@ bool Adafruit_Marquee::publishStatus(const char *payload) {
 
 /*!
     @brief  Reads the CRC32 of the bitmap drawn to the panel (prior to sleep)
-    @param  crc  If this library returns True, set to the CRC32 of the b64 payload.
+    @param  crc  If this library returns True, set to the CRC32 of the b64
+   payload.
     @return True if a CRC was successfully stored, False otherwise.
 */
 bool Adafruit_Marquee::loadPrvBmpCRC(uint32_t &crc) {
@@ -561,7 +570,6 @@ void Adafruit_Marquee::storeBmpCRC(uint32_t crc) {
   (void)crc;
 #endif // ARDUINO_ARCH_ESP32
 }
-
 
 /*!
     @brief  Draws the bitmap queued by the bitmap feed callback, if any.
@@ -648,7 +656,6 @@ void Adafruit_Marquee::run() {
   handleSleep();
 }
 
-
 /*!
     @brief  Callback for bitmap feed messages. Forwards the payload to the
             instance registered by initMqtt().
@@ -668,7 +675,8 @@ void Adafruit_Marquee::cbBitmapMsg(char *data, size_t len) {
 }
 
 /*!
-    @brief  Callback for sleep feed messages, parses and stores the sleep feed's JSON data into the class instance.
+    @brief  Callback for sleep feed messages, parses and stores the sleep feed's
+   JSON data into the class instance.
     @param  data  The message payload.
     @param  len   Payload length, in bytes.
 */
@@ -772,7 +780,8 @@ bool Adafruit_Marquee::createEPD(const char *panel) {
     return false;
   }
 
-  // If the board doesn't use the default SPI pins, re-map the bus to the pins in the config file
+  // If the board doesn't use the default SPI pins, re-map the bus to the pins
+  // in the config file
   if (_pin_sclk >= 0 || _pin_mosi >= 0) {
     SPI.begin(_pin_sclk, _pin_miso, _pin_mosi, /*ss=*/-1);
   }
@@ -824,7 +833,7 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
     return false;
   }
 
-  // Calculate the CRC of the payload 
+  // Calculate the CRC of the payload
   uint32_t crc = calcCRC32((const uint8_t *)b64, b64_len);
   // Compare the payload's CRC to the last drawn bitmap's CRC
   uint32_t prv_crc;
@@ -873,7 +882,8 @@ bool Adafruit_Marquee::decodeb64Bmp(const char *b64, size_t b64_len) {
   _pending_bmp_len = decoded_len;
   _pending_crc = crc;
 
-  MQ_DEBUG_PRINTF("[bmp] decoded %u bytes, queued for draw\n", (unsigned)decoded_len);
+  MQ_DEBUG_PRINTF("[bmp] decoded %u bytes, queued for draw\n",
+                  (unsigned)decoded_len);
   return true;
 }
 
@@ -923,7 +933,8 @@ bool Adafruit_Marquee::didWakeFromSleep() {
 
 /*!
     @brief  Enables the ESP32 timer wakeup source.
-    @param  wakeup_time_sec  Expected number of seconds to wait before waking up.
+    @param  wakeup_time_sec  Expected number of seconds to wait before waking
+   up.
     @return True if the timer wakeup was successfully enabled, False otherwise.
 */
 bool Adafruit_Marquee::enableTimerWakeup(uint64_t wakeup_time_sec) {
@@ -974,7 +985,8 @@ void Adafruit_Marquee::handleSleep() {
 
   // Do not enter sleep until the bitmap message has been received and drawn
   if (_awaiting_bmp || _awaiting_sleep) {
-    MQ_DEBUG_PRINTLN("[sleep] Holding off sleep until bitmap has been received");
+    MQ_DEBUG_PRINTLN(
+        "[sleep] Holding off sleep until bitmap has been received");
     return;
   }
 
@@ -985,7 +997,8 @@ void Adafruit_Marquee::handleSleep() {
     return;
   }
 
-  // NOTE/TODO: _sleep_alarm is parsed but not used yet. We only support wake from timer.
+  // NOTE/TODO: _sleep_alarm is parsed but not used yet. We only support wake
+  // from timer.
   if (!enableTimerWakeup(_sleep_time)) {
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
     _is_sleep_pending = false;
@@ -1013,12 +1026,14 @@ void Adafruit_Marquee::handleSleep() {
   disconnectBeforeSleep();
 
   if (_sleep_mode == SLEEP_MODE_DEEP) {
-    MQ_DEBUG_PRINTF("[sleep] entering deep sleep for %llu s\n", (unsigned long long)_sleep_time);
+    MQ_DEBUG_PRINTF("[sleep] entering deep sleep for %llu s\n",
+                    (unsigned long long)_sleep_time);
     esp_deep_sleep_start();
     // Not reached: the chip resets on wake.
   } else {
     // The guard above leaves light sleep as the only remaining mode.
-    MQ_DEBUG_PRINTF("[sleep] entering light sleep for %llu s\n", (unsigned long long)_sleep_time);
+    MQ_DEBUG_PRINTF("[sleep] entering light sleep for %llu s\n",
+                    (unsigned long long)_sleep_time);
     esp_err_t rc = esp_light_sleep_start();
 
     // Re-enumerate USB
