@@ -10,7 +10,8 @@
 #define FLASH_CONFIG_H_
 
 #ifndef ADAFRUIT_MARQUEE_INTERNAL
-#error "flash_config.h is internal to Adafruit_Marquee: including it defines a second flashTransport. Include Adafruit_Marquee.h and use Adafruit_Marquee::flash instead."
+#error                                                                         \
+    "flash_config.h is internal to Adafruit_Marquee: including it defines a second flashTransport. Include Adafruit_Marquee.h and use Adafruit_Marquee::flash instead."
 #endif
 
 #include "Adafruit_SPIFlash.h"
