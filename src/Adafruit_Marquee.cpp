@@ -656,7 +656,7 @@ void Adafruit_Marquee::run() {
                   nul-terminates this, so it can be treated as a C string.
     @param  len   Payload length, in bytes.
 */
-void Adafruit_Marquee::cbBitmapMsg(char *data, uint32_t len) {
+void Adafruit_Marquee::cbBitmapMsg(char *data, size_t len) {
   if (!_instance)
     return;
   _instance->_awaiting_bmp = false;
@@ -672,7 +672,7 @@ void Adafruit_Marquee::cbBitmapMsg(char *data, uint32_t len) {
     @param  data  The message payload.
     @param  len   Payload length, in bytes.
 */
-void Adafruit_Marquee::cbSleepMsg(char *data, uint32_t len) {
+void Adafruit_Marquee::cbSleepMsg(char *data, size_t len) {
   if (!_instance)
     return;
   _instance->_awaiting_sleep = false;

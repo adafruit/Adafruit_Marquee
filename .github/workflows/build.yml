@@ -1,0 +1,153 @@
+# SPDX-FileCopyrightText: Brent Rubell for Adafruit Industries, 2023
+#
+# SPDX-License-Identifier: MIT
+name: Marquee Build CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_call:
+    secrets:
+      GH_REPO_TOKEN:
+        required: true
+
+jobs:
+  build:
+    name: ${{ matrix.env }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Adafruit_Marquee
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - env: magtag
+            chip: esp32s2
+            flash_size: 4MB
+            flash_bytes: 4194304
+            bootloader_offset: "0x1000"
+          - env: adafruit_feather_esp32s3
+            chip: esp32s3
+            flash_size: 4MB
+            flash_bytes: 4194304
+            bootloader_offset: "0x0"
+          - env: x4pro
+            chip: esp32s3
+            flash_size: 16MB
+            flash_bytes: 16777216
+            bootloader_offset: "0x0"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: Adafruit_Marquee
+
+      - uses: actions/checkout@v4
+        with:
+          repository: brentru/Adafruit_MQTT_Library
+          ref: fix/widen-uint16_t
+          path: Adafruit_MQTT_Library
+
+      - uses: actions/checkout@v4
+        with:
+          repository: brentru/Adafruit_EPD
+          ref: add-driver-uc8279
+          path: Adafruit_EPD
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: |
+          pip install --upgrade platformio
+
+      - name: Install Esptool
+        run: |
+          pip install "esptool==5.1.0"
+          esptool version
+
+      - name: Build Marquee for ${{ matrix.env }}
+        run: pio run -e ${{ matrix.env }}
+
+      - name: Get boot_app0.bin
+        id: bootapp0
+        run: |
+          set -euo pipefail
+          path=$(find "$HOME/.platformio/packages" \
+            -path '*framework-arduinoespressif32*/tools/partitions/boot_app0.bin' -print -quit)
+          test -n "$path" || { echo "::error::boot_app0.bin not found"; exit 1; }
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Stage release files
+        id: rel
+        env:
+          BOOT_APP0: ${{ steps.bootapp0.outputs.path }}
+        run: |
+          set -euo pipefail
+          BUILD=".pio/build/${{ matrix.env }}"
+          OUT="$GITHUB_WORKSPACE/release/marquee-${{ matrix.env }}"
+          mkdir -p "$OUT"
+          cp "$BUILD"/firmware.bin "$BUILD"/bootloader.bin "$BUILD"/partitions.bin "$OUT"/
+          cp "$BOOT_APP0" "$OUT/boot_app0.bin"
+          echo "out=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Get build metadata
+        id: meta
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          echo "sha=${HEAD_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          # Reads the first build_type in platformio.ini (the [env] one); it does
+          # not resolve per-env overrides, so add one and this reports the parent.
+          echo "build_type=$(grep -m1 '^build_type' platformio.ini | cut -d= -f2 | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Merge binaries into an image for flashing
+        working-directory: ${{ steps.rel.outputs.out }}
+        run: |
+          set -euo pipefail
+          esptool --chip ${{ matrix.chip }} merge-bin \
+            --output merged-flash.bin --format raw \
+            --flash-mode keep --flash-freq keep --flash-size ${{ matrix.flash_size }} \
+            ${{ matrix.bootloader_offset }} bootloader.bin \
+            0x8000  partitions.bin \
+            0xe000  boot_app0.bin \
+            0x10000 firmware.bin
+
+      # Upload the directory
+      - name: Attach to CI run
+        uses: actions/upload-artifact@v4
+        with:
+          name: marquee-${{ matrix.env }}-${{ steps.meta.outputs.sha }}
+          path: ${{ steps.rel.outputs.out }}/
+
+
+  clang_and_doxy:
+    name: 🔎 Clang & Doxygen
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: adafruit/ci-arduino
+          path: ci
+      - name: pre-install
+        run: bash ci/actions_install.sh
+
+      - name: clang
+        run: python3 ci/run-clang-format.py -r -e "ci/*" -e "bin/*" -e src/nanopb -e src/wippersnapper -e src/pb.h -e src/provisioning/tinyusb  src/
+
+      - name: doxygen
+        env:
+          GH_REPO_TOKEN: ${{ secrets.GH_REPO_TOKEN }}
+          PRETTYNAME: "Adafruit_Marquee"
+        run: bash ci/doxy_gen_and_deploy.sh

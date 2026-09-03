@@ -191,8 +191,8 @@ protected:
                                                 ///< feed
   char _topic_status[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>, no /csv:
                                                  ///< the payload is JSON
-  static void cbBitmapMsg(char *data, uint32_t len);
-  static void cbSleepMsg(char *data, uint32_t len);
+  static void cbBitmapMsg(char *data, size_t len);
+  static void cbSleepMsg(char *data, size_t len);
   void getFromFeed(const char *topic);
   bool publishStatus(const char *payload);
 
