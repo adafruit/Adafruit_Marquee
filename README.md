@@ -1,4 +1,4 @@
-# Adafruit Marquee Library [![Build CI](https://github.com/adafruit/Adafruit_Marquee/actions/workflows/githubci.yml/badge.svg)](https://github.com/adafruit/Adafruit_Marquee/actions)[![Documentation](https://github.com/adafruit/ci-arduino/blob/master/assets/doxygen_badge.svg)](http://adafruit.github.io/Adafruit_Marquee/html/index.html)
+# Adafruit Marquee Library [![Build CI](https://github.com/adafruit/Adafruit_Marquee/actions/workflows/githubci.yml/badge.svg)](https://github.com/adafruit/Adafruit_Marquee/actions)[![Documentation](https://github.com/adafruit/ci-arduino/blob/master/assets/doxygen_badge.svg)](http://adafruit.github.io/Adafruit_Marquee/html/index.html)[![MemBrowse](https://membrowse.com/badge.svg)](https://membrowse.com/public/adafruit/Adafruit_Marquee)
 
 NOTE: This library is **not** ready for public consumption yet. Stay tuned!
 

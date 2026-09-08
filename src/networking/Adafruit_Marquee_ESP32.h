@@ -52,7 +52,6 @@ public:
   */
   const char *connectionType() { return "wifi"; }
 
-
   /*!
       @brief  Constructs the secure MQTT client
   */
@@ -83,7 +82,8 @@ protected:
   */
   void _disconnect() { WiFi.disconnect(); }
 
-  WiFiClientSecure *_mqtt_client_secure = nullptr; ///< Instance of secure WiFiClient
+  WiFiClientSecure *_mqtt_client_secure =
+      nullptr;            ///< Instance of secure WiFiClient
   bool _mode_set = false; ///< Whether WIFI_STA has been already selected
 
   const char *_aio_root_ca =

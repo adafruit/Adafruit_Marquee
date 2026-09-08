@@ -15,8 +15,7 @@
 /** ESP32's networking adapter */
 typedef Adafruit_Marquee_ESP32 Adafruit_Marquee_WiFi;
 #else
-#error                                                                         \
-    "Adafruit_Marquee has no network adapter for this architecture."
+#error "Adafruit_Marquee has no network adapter for this architecture."
 #endif
 
 #endif // ADAFRUIT_MARQUEE_WIFI_H
