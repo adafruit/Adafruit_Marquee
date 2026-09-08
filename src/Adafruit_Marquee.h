@@ -28,11 +28,22 @@
 #ifndef MARQUEE_DEBUG
 #define MARQUEE_DEBUG 1
 #endif
+#define MQ_USB_DRAIN_MS                                                        \
+  150 ///< How long to let the host read the CDC TX FIFO before detaching USB,
+      ///< in milliseconds.
 #if MARQUEE_DEBUG
 #define MQ_DEBUG_PRINT(...) Serial.print(__VA_ARGS__)     ///< Debug, no newline
 #define MQ_DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__) ///< Debug + newline
 #define MQ_DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)   ///< Formatted debug
-#define MQ_DEBUG_FLUSH() Serial.flush()                   ///< Drain the TX FIFO
+// Adafruit_USBD_CDC::flush() only hands the TX FIFO to the USB IN endpoint and
+// returns; it does not wait for the host to poll it. Callers that pull USB down
+// straight after (see disconnectBeforeSleep()) would drop the last few lines
+// with the bus, so hold the bus up long enough for the host to read them.
+#define MQ_DEBUG_FLUSH()                                                       \
+  do {                                                                         \
+    Serial.flush();                                                            \
+    delay(MQ_USB_DRAIN_MS);                                                    \
+  } while (0) ///< Drain the TX FIFO and wait for the host to read it
 #else
 #define MQ_DEBUG_PRINT(...)                                                    \
   do {                                                                         \
@@ -77,6 +88,7 @@ typedef enum {
   ERR_IFACE_UNSUPPORTED = -5,
   ERR_EPD_PANEL_UNSUPPORTED = -6,
   ERR_INVALID_CREDS = -7,
+  ERR_FLASH_INIT = -8,
 } mq_begin_status_t; ///< Return codes for Adafruit_Marquee::begin()
 
 typedef enum {
@@ -120,7 +132,7 @@ protected:
   mq_begin_status_t _begin_status;
   JsonDocument _cfg_doc;
   // USB MSC and Filesystem API
-  bool initFilesystem();
+  mq_begin_status_t initFilesystem();
   void initUSBMSC();
 
   // Networking API
