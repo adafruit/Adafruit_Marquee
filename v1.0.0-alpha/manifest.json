@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "tag": "v1.0.0-alpha",
+  "version": "1.0.0-alpha",
+  "prerelease": false,
+  "published_at": "2026-09-09T20:06:35Z",
+  "commit": "4d0b1601bdbd3e5983c0ddb0d4adad5d8d1c1f6c",
+  "boards": {
+    "adafruit_feather_esp32s3": {
+      "bin": "v1.0.0-alpha/marquee-adafruit_feather_esp32s3/merged-flash.bin",
+      "size": 1303056,
+      "sha256": "fcdea965865f56ecd0c2ce721eda72f3fe12699c8008b9b86b4228ef6d8abee8",
+      "chip": "ESP32-S3",
+      "bootloader_offset": "0x0"
+    },
+    "magtag": {
+      "bin": "v1.0.0-alpha/marquee-magtag/merged-flash.bin",
+      "size": 1265344,
+      "sha256": "81edc3d0d0213461bae7c0c19280a20be903db59200865354678cd5e1009f38c",
+      "chip": "ESP32-S2",
+      "bootloader_offset": "0x1000"
+    },
+    "x4pro": {
+      "bin": "v1.0.0-alpha/marquee-x4pro/merged-flash.bin",
+      "size": 1311248,
+      "sha256": "bfc0104a0ab63d5e58f86e83b9d7c55d1f1676e631328a09bc25bac1508b7316",
+      "chip": "ESP32-S3",
+      "bootloader_offset": "0x0"
+    }
+  }
+}
