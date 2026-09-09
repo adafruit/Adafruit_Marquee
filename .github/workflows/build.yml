@@ -27,16 +27,19 @@ jobs:
         include:
           - env: magtag
             chip: esp32s2
+            chip_name: ESP32-S2
             flash_size: 4MB
             flash_bytes: 4194304
             bootloader_offset: "0x1000"
           - env: adafruit_feather_esp32s3
             chip: esp32s3
+            chip_name: ESP32-S3
             flash_size: 4MB
             flash_bytes: 4194304
             bootloader_offset: "0x0"
           - env: x4pro
             chip: esp32s3
+            chip_name: ESP32-S3
             flash_size: 16MB
             flash_bytes: 16777216
             bootloader_offset: "0x0"
@@ -94,6 +97,9 @@ jobs:
           mkdir -p "$OUT"
           cp "$BUILD"/firmware.bin "$BUILD"/bootloader.bin "$BUILD"/partitions.bin "$OUT"/
           cp "$BOOT_APP0" "$OUT/boot_app0.bin"
+          # Describes the build so the publish job does not re-derive the matrix.
+          printf '{"env":"%s","chip":"%s","flash_size":"%s","bootloader_offset":"%s"}\n' \
+            "${{ matrix.env }}" "${{ matrix.chip_name }}" "${{ matrix.flash_size }}" "${{ matrix.bootloader_offset }}" > "$OUT/build.json"
           echo "out=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: Get build metadata
@@ -126,6 +132,81 @@ jobs:
           name: marquee-${{ matrix.env }}-${{ steps.meta.outputs.sha }}
           path: ${{ steps.rel.outputs.out }}/
 
+
+  # On a published release: the bare binaries go to the orphan `firmware` branch, where
+  # raw.githubusercontent.com serves them WITH a CORS header — which is the only way a web page
+  # (Marquee_Web's A6-A) can download them; GitHub's release-asset CDN sends none. The Release
+  # page gets zips of the same directories for people. manifest.json at the branch root is the
+  # latest release; each tag keeps its own copy.
+  publish:
+    name: Publish firmware release
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      PRERELEASE: ${{ github.event.release.prerelease }}
+      PUBLISHED_AT: ${{ github.event.release.published_at }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: marquee-*
+          path: artifacts            # artifacts/marquee-<env>-<sha7>/{*.bin, build.json}
+
+      - name: Stage boards and write manifest.json
+        run: |
+          set -euo pipefail
+          mkdir -p out/branch/"$TAG" out/zips
+          manifest=$(jq -n --arg tag "$TAG" --arg version "${TAG#v}" --argjson prerelease "$PRERELEASE" \
+            --arg published_at "$PUBLISHED_AT" --arg commit "$GITHUB_SHA" \
+            '{schema:1, tag:$tag, version:$version, prerelease:$prerelease, published_at:$published_at, commit:$commit, boards:{}}')
+          for dir in artifacts/marquee-*; do
+            name=$(basename "$dir")     # marquee-<env>-<sha7>
+            env=${name%-*}              # marquee-<env>   (env names contain no '-')
+            board=${env#marquee-}
+            test -f "$dir/merged-flash.bin" || { echo "::error::$name has no merged-flash.bin"; exit 1; }
+            # The branch gets the bare files; the release gets a zip of the same directory.
+            mkdir -p "out/branch/$TAG/$env"
+            cp "$dir"/*.bin "$dir"/build.json "out/branch/$TAG/$env/"
+            ( cd "$dir" && zip -X -r "$GITHUB_WORKSPACE/out/zips/$env.zip" . )
+            sha=$(sha256sum "$dir/merged-flash.bin" | cut -d' ' -f1)
+            size=$(stat -c%s "$dir/merged-flash.bin")
+            chip=$(jq -r .chip "$dir/build.json")
+            off=$(jq -r .bootloader_offset "$dir/build.json")
+            manifest=$(jq --arg b "$board" --arg bin "$TAG/$env/merged-flash.bin" --argjson size "$size" \
+                          --arg sha "$sha" --arg chip "$chip" --arg off "$off" \
+              '.boards[$b] = {bin:$bin, size:$size, sha256:$sha, chip:$chip, bootloader_offset:$off}' <<<"$manifest")
+          done
+          printf '%s\n' "$manifest" | jq . > out/branch/manifest.json
+          cp out/branch/manifest.json "out/branch/$TAG/manifest.json"
+          cat out/branch/manifest.json
+
+      - name: Attach zips and manifest to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" out/zips/*.zip out/branch/manifest.json --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Commit to the firmware branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init -q fw && cd fw
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch -q --depth=1 origin firmware; then
+            git checkout -q -b firmware FETCH_HEAD
+          else
+            git checkout -q --orphan firmware
+            printf '# Firmware releases\n\nWritten by CI on every published release. `manifest.json` is the latest; each tag has its own directory. Do not edit by hand.\n' > README.md
+          fi
+          cp -R ../out/branch/. .
+          git add -A
+          git commit -q -m "Publish $TAG" || { echo "nothing to commit"; exit 0; }
+          git push -q origin firmware
 
   clang_and_doxy:
     name: 🔎 Clang & Doxygen
