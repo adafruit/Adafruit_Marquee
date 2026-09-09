@@ -60,7 +60,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.13.0"
 
       - name: Install PlatformIO
         run: |
@@ -133,7 +133,7 @@ jobs:
     steps:
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.13.0"
       - uses: actions/checkout@v4
 
       - uses: actions/checkout@v4
@@ -144,7 +144,7 @@ jobs:
         run: bash ci/actions_install.sh
 
       - name: clang
-        run: python3 ci/run-clang-format.py -r -e "ci/*" -e "bin/*" -e src/nanopb -e src/wippersnapper -e src/pb.h -e src/provisioning/tinyusb  src/
+        run: python3 ci/run-clang-format.py -r -e "ci/*" -e "bin/*" -e src/fatfs src/
 
       - name: doxygen
         env:

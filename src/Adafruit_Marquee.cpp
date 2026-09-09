@@ -34,6 +34,18 @@ static RTC_DATA_ATTR uint32_t
 #define ADAFRUIT_MARQUEE_INTERNAL
 #include "flash_config.h"
 
+// Elm Chan's FatFs, vendored under src/fatfs/, is used only to format the
+// flash: SdFat can mount FAT12 but cannot create it, and its FatFormatter
+// refuses volumes of 6 MB or less. The version check catches an accidental
+// pickup of the ESP-IDF copy of ff.h (R0.15, with a different f_mkfs
+// signature) that also sits on the include path.
+#include "fatfs/ff.h"
+// diskio.h uses ff.h's typedefs, so it has to come second
+#include "fatfs/diskio.h"
+#if FF_DEFINED != 86604
+#error "Adafruit_Marquee expects its vendored FatFs R0.13c (src/fatfs)"
+#endif
+
 // The flash chip and the USB Mass Storage endpoint are single pieces of
 // hardware and nothing outside this file touches them, so they are internal
 // to this translation unit. Keep them below the flash_config.h include:
@@ -43,8 +55,6 @@ static Adafruit_SPIFlash flash(&flashTransport);
 
 // file system object from SdFat
 static FatVolume fatfs;
-static FatFile root;
-static FatFile file;
 
 static Adafruit_USBD_MSC usb_msc; ///< USB Mass Storage device object
 
@@ -82,6 +92,86 @@ static void msc_flush_cb(void) {
   // clear file system's cache to force refresh
   fatfs.cacheClear();
   Adafruit_Marquee::fs_changed = true;
+}
+
+/**
+    @brief  Low-level disk i/o for fatfs.
+*/
+extern "C" {
+/**
+    @brief  Gets the current status of the disk.
+*/
+DSTATUS disk_status(BYTE pdrv) {
+  (void)pdrv;
+  return 0;
+}
+
+/**
+    @brief  Initializes the disk.
+*/
+DSTATUS disk_initialize(BYTE pdrv) {
+  (void)pdrv;
+  return 0;
+}
+
+DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count) {
+  (void)pdrv;
+  return flash.readBlocks(sector, buff, count) ? RES_OK : RES_ERROR;
+}
+
+/**
+    @brief  Reads sectors from the disk.
+*/
+DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count) {
+  (void)pdrv;
+  return flash.writeBlocks(sector, buff, count) ? RES_OK : RES_ERROR;
+}
+
+/**
+    @brief  I/O control for the disk.
+*/
+DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff) {
+  (void)pdrv;
+  switch (cmd) {
+  case CTRL_SYNC:
+    flash.syncBlocks();
+    return RES_OK;
+  case GET_SECTOR_COUNT:
+    *((DWORD *)buff) = flash.size() / 512;
+    return RES_OK;
+  case GET_SECTOR_SIZE:
+    *((WORD *)buff) = 512;
+    return RES_OK;
+  case GET_BLOCK_SIZE:
+    *((DWORD *)buff) = 8; // 4 KB erase block, in sectors
+    return RES_OK;
+  default:
+    return RES_PARERR;
+  }
+}
+}
+
+/*!
+    @brief  Attempts to create a new FAT volume.
+    @return True if the volume was created and labeled, False otherwise.
+*/
+static bool formatFilesystem() {
+  bool ok = false;
+  const size_t workbuf_len = 4096;
+  // Allocate a block for the FS object
+  uint8_t *mem = (uint8_t *)malloc(sizeof(FATFS) + workbuf_len);
+  if (!mem) {
+    return false;
+  }
+  FATFS *fs = (FATFS *)mem;
+  uint8_t *workbuf = mem + sizeof(FATFS);
+
+  ok = f_mkfs("", FM_FAT | FM_SFD, 0, workbuf, workbuf_len) == FR_OK &&
+       f_mount(fs, "0:", 1) == FR_OK && f_setlabel("MARQUEE") == FR_OK;
+  f_unmount("0:");
+  free(mem);
+  flash.syncBlocks();
+  return ok;
 }
 
 /*!
@@ -244,16 +334,19 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   TinyUSBDevice.detach();
   delay(500);
 
-  // Attempt to init. the flash chip and the file system on it
-  if (!initFilesystem()) {
-    // Still bring MSC up so the flash is reachable from the host to be fixed
-    initUSBMSC();
-    _begin_status = ERR_FS_UNFORMATTED;
+  // Init. the flash and mount the file system on it
+  _begin_status = initFilesystem();
+  if (_begin_status == ERR_FLASH_INIT) {
+    // Failed, attach USB for debugging over serial
+    TinyUSBDevice.attach();
+    delay(500);
     return _begin_status;
   }
 
-  // Reattach FS
   initUSBMSC();
+  if (_begin_status != SUCCESS) {
+    return _begin_status;
+  }
 
   // Attempt to open and parse the marquee config file
   File32 cfg = fatfs.open("/cfg-marquee.json", O_RDONLY);
@@ -279,10 +372,7 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   _height = _display->height();
   _width = _display->width();
   _display->clearBuffer();
-  // An EPD holds its last image with the power off, so a cold boot comes up
-  // showing whatever was on the panel beforehand - push the cleared buffer out
-  // to wipe it. A wake from sleep is resuming the image we deliberately left
-  // up, so skip the refresh there and let run() redraw only on a new bitmap.
+  // If we are cold booting - push an empty buffer to the display
   if (!didWakeFromSleep()) {
     _display->display();
   }
@@ -304,16 +394,21 @@ mq_begin_status_t Adafruit_Marquee::begin() {
 }
 
 /*!
-    @brief  Initializes the flash chip and mounts the FAT filesystem on it.
-    @return True if the flash came up and the filesystem mounted, else False.
+    @brief  Initializes, optionally formats and mounts a fat fs.
+    @return SUCCESS, ERR_FLASH_INIT if there is no usable flash partition, or
+            ERR_FS_UNFORMATTED if the volume could not be formatted or mounted.
 */
-bool Adafruit_Marquee::initFilesystem() {
-  if (!flash.begin()) {
-    return false;
+mq_begin_status_t Adafruit_Marquee::initFilesystem() {
+  if (!flash.begin() || flash.size() == 0) {
+    return ERR_FLASH_INIT;
   }
 
-  fs_formatted = fatfs.begin(&flash);
-  return fs_formatted;
+  if (!fatfs.begin(&flash) && !(formatFilesystem() && fatfs.begin(&flash))) {
+    return ERR_FS_UNFORMATTED;
+  }
+
+  fs_formatted = true;
+  return SUCCESS;
 }
 
 /*!
@@ -713,6 +808,7 @@ void Adafruit_Marquee::cbSleepMsg(char *data, size_t len) {
   }
   _instance->_sleep_time = doc["sleep_time"] | 60;
   _instance->_is_sleep_pending = true;
+  MQ_DEBUG_PRINTLN("[sleep] Sleep feed stored, sleep pending");
 }
 
 /*!
@@ -810,8 +906,6 @@ bool Adafruit_Marquee::parseThinkInkMode(const char *mode) {
     _thinkInkMode = THINKINK_TRICOLOR;
   } else if (strcmp(mode, "grayscale4") == 0) {
     _thinkInkMode = THINKINK_GRAYSCALE4;
-  } else if (strcmp(mode, "mono_partial") == 0) {
-    _thinkInkMode = THINKINK_MONO_PARTIAL;
   } else if (strcmp(mode, "quadcolor") == 0) {
     _thinkInkMode = THINKINK_QUADCOLOR;
   } else {
@@ -953,6 +1047,8 @@ bool Adafruit_Marquee::enableTimerWakeup(uint64_t wakeup_time_sec) {
 void Adafruit_Marquee::disconnectBeforeSleep() {
   flash.syncDevice();
   _mqtt->disconnect();
+  // Blocks until the host has had a chance to read the pending log lines,
+  // otherwise the detach() below drops them along with the bus.
   MQ_DEBUG_FLUSH();
   TinyUSBDevice.detach();
   delay(10);
@@ -990,12 +1086,16 @@ void Adafruit_Marquee::handleSleep() {
     return;
   }
 
+  MQ_DEBUG_PRINTLN("[sleep] Entering sleep mode");
+
 #ifdef ARDUINO_ARCH_ESP32
   if (_sleep_mode != SLEEP_MODE_DEEP && _sleep_mode != SLEEP_MODE_LIGHT) {
     MQ_DEBUG_PRINTLN("[sleep] ERROR: unsupported sleep mode, staying awake!");
     _is_sleep_pending = false;
     return;
   }
+
+  MQ_DEBUG_PRINTLN("[sleep] Creating sleep configuration JSON payload");
 
   // Publish the sleeping status to the status feed before entering sleep
   JsonDocument doc;
@@ -1008,8 +1108,9 @@ void Adafruit_Marquee::handleSleep() {
   if (len == 0 || len >= sizeof(payload)) {
     MQ_DEBUG_PRINTLN("[sleep] ERROR: could not serialize the status payload");
   } else {
+    MQ_DEBUG_PRINT("[sleep] Publishing sleep payload...");
     publishStatus(payload);
-    MQ_DEBUG_PRINTLN("[sleep] published status to feed");
+    MQ_DEBUG_PRINTLN("published!");
   }
 
   // NOTE/TODO: _sleep_alarm is parsed but not used yet. We only support wake
