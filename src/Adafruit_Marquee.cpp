@@ -94,14 +94,21 @@ static void msc_flush_cb(void) {
   Adafruit_Marquee::fs_changed = true;
 }
 
-// FatFs low-level disk I/O, routed to the same Adafruit_SPIFlash object the
-// MSC callbacks and SdFat use. Only ever exercised by formatFilesystem().
+/**
+    @brief  Low-level disk i/o for fatfs.
+*/
 extern "C" {
+/**
+    @brief  Gets the current status of the disk.
+*/
 DSTATUS disk_status(BYTE pdrv) {
   (void)pdrv;
   return 0;
 }
 
+/**
+    @brief  Initializes the disk.
+*/
 DSTATUS disk_initialize(BYTE pdrv) {
   (void)pdrv;
   return 0;
@@ -112,11 +119,17 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count) {
   return flash.readBlocks(sector, buff, count) ? RES_OK : RES_ERROR;
 }
 
+/**
+    @brief  Reads sectors from the disk.
+*/
 DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count) {
   (void)pdrv;
   return flash.writeBlocks(sector, buff, count) ? RES_OK : RES_ERROR;
 }
 
+/**
+    @brief  I/O control for the disk.
+*/
 DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff) {
   (void)pdrv;
   switch (cmd) {
@@ -139,17 +152,13 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff) {
 }
 
 /*!
-    @brief  Creates a new FAT volume on the flash. DESTRUCTIVE: erases
-            everything on it. Single-partition ("super floppy") layout with no
-            MBR, FAT12 or FAT16 depending on size, the same layout
-            CircuitPython and WipperSnapper use.
-    @return True if the volume was created and labeled, else False.
+    @brief  Attempts to create a new FAT volume.
+    @return True if the volume was created and labeled, False otherwise.
 */
 static bool formatFilesystem() {
+  bool ok = false;
   const size_t workbuf_len = 4096;
-  // One transient heap block for the FATFS object and the f_mkfs work buffer:
-  // ~4.7 KB that should neither live forever in .bss nor sit on the 8 KB
-  // loopTask stack underneath the flash driver's own frames.
+  // Allocate a block for the FS object
   uint8_t *mem = (uint8_t *)malloc(sizeof(FATFS) + workbuf_len);
   if (!mem) {
     return false;
@@ -157,10 +166,8 @@ static bool formatFilesystem() {
   FATFS *fs = (FATFS *)mem;
   uint8_t *workbuf = mem + sizeof(FATFS);
 
-  bool ok = f_mkfs("", FM_FAT | FM_SFD, 0, workbuf, workbuf_len) == FR_OK &&
-            f_mount(fs, "0:", 1) == FR_OK && f_setlabel("MARQUEE") == FR_OK;
-  // f_mount() stashed `fs` in FatFs' static drive table; unmount before the
-  // memory goes away so the table never points into freed heap.
+  ok = f_mkfs("", FM_FAT | FM_SFD, 0, workbuf, workbuf_len) == FR_OK &&
+       f_mount(fs, "0:", 1) == FR_OK && f_setlabel("MARQUEE") == FR_OK;
   f_unmount("0:");
   free(mem);
   flash.syncBlocks();
@@ -327,17 +334,15 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   TinyUSBDevice.detach();
   delay(500);
 
-  // Init. the flash and mount (formatting if needed) the file system on it
+  // Init. the flash and mount the file system on it
   _begin_status = initFilesystem();
   if (_begin_status == ERR_FLASH_INIT) {
-    // No flash partition to expose: just bring USB (CDC) back for the sketch
+    // Failed, attach USB for debugging over serial
     TinyUSBDevice.attach();
     delay(500);
     return _begin_status;
   }
 
-  // Expose the volume to the host, even if it could not be formatted so it is
-  // still reachable to be fixed manually
   initUSBMSC();
   if (_begin_status != SUCCESS) {
     return _begin_status;
@@ -367,10 +372,7 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   _height = _display->height();
   _width = _display->width();
   _display->clearBuffer();
-  // An EPD holds its last image with the power off, so a cold boot comes up
-  // showing whatever was on the panel beforehand - push the cleared buffer out
-  // to wipe it. A wake from sleep is resuming the image we deliberately left
-  // up, so skip the refresh there and let run() redraw only on a new bitmap.
+  // If we are cold booting - push an empty buffer to the display
   if (!didWakeFromSleep()) {
     _display->display();
   }
@@ -392,14 +394,11 @@ mq_begin_status_t Adafruit_Marquee::begin() {
 }
 
 /*!
-    @brief  Initializes the flash and mounts the FAT filesystem on it,
-            formatting the volume first if it does not hold one.
+    @brief  Initializes, optionally formats and mounts a fat fs.
     @return SUCCESS, ERR_FLASH_INIT if there is no usable flash partition, or
             ERR_FS_UNFORMATTED if the volume could not be formatted or mounted.
 */
 mq_begin_status_t Adafruit_Marquee::initFilesystem() {
-  // On ESP32 flash.begin() succeeds even when the partition table has no
-  // data,fat entry; the flash then reports a size of 0. Formatting can't help.
   if (!flash.begin() || flash.size() == 0) {
     return ERR_FLASH_INIT;
   }
