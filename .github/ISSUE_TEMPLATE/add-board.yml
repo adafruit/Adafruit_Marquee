@@ -1,0 +1,44 @@
+name: Add a new board to marquee
+description: Request support for a new board in marquee.
+title: "Add board: <board name>"
+labels: []
+body:
+  - type: input
+    id: board_name
+    attributes:
+      label: Board Name
+      placeholder: e.g., Adafruit MagTag 2.9"
+    validations:
+      required: true
+
+  - type: input
+    id: purchase_url
+    attributes:
+      label: Purchase URL
+      placeholder: https://www.adafruit.com/product/xxxx
+    validations:
+      required: true
+
+  - type: input
+    id: microcontroller
+    attributes:
+      label: Microcontroller (if known)
+      placeholder: e.g., ESP32-S3
+    validations:
+      required: false
+
+  - type: input
+    id: panel_driver
+    attributes:
+      label: E-Paper Display Panel Driver Name (if known)
+      placeholder: e.g., UC8151
+    validations:
+      required: false
+
+  - type: input
+    id: panel_name
+    attributes:
+      label: E-Paper Display Panel Name (if known)
+      placeholder: e.g., IL0373 2.9" tri-color panel
+    validations:
+      required: false
