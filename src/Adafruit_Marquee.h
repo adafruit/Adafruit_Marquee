@@ -68,8 +68,8 @@
   (MQ_BITMAP_SUB_LEN + 256) ///< Packet buffer for the MQTT client + 256 bytes
                             ///< of headroom for the topic, in bytes
 
-#define MQ_IO_HOST "io.adafruit.us" ///< Adafruit IO staging server
-#define MQ_IO_MQTT_PORT 8883        ///< Adafruit IO MQTT server port
+#define MQ_IO_HOST "io.adafruit.com" ///< Adafruit IO MQTT server address
+#define MQ_IO_MQTT_PORT 8883         ///< Adafruit IO MQTT server port
 
 #define MQ_MQTT_KEEPALIVE_SEC 180 ///< Keepalive, in seconds
 #define MQ_WIFI_RETRY_MS                                                       \
