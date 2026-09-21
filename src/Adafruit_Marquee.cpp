@@ -850,7 +850,7 @@ mq_begin_status_t Adafruit_Marquee::parseDisplayCfg(File32 &cfg) {
   _pin_rst = pins["reset"] | -1;
   _pin_busy = pins["busy"] | -1;
   _pin_sram_cs = pins["sram_cs"] | -1;
-  _pin_sclk = pins["sclk"] | -1;
+  _pin_sclk = pins["sclk"] | pins["sck"] | -1;
   _pin_mosi = pins["mosi"] | -1;
   _pin_miso = pins["miso"] | -1;
 
@@ -878,9 +878,8 @@ bool Adafruit_Marquee::createEPD(const char *panel) {
 
   // If the board doesn't use the default SPI pins, re-map the bus to the pins
   // in the config file
-  if (_pin_sclk >= 0 || _pin_mosi >= 0) {
+  if (_pin_sclk >= 0 || _pin_mosi >= 0)
     SPI.begin(_pin_sclk, _pin_miso, _pin_mosi, /*ss=*/-1);
-  }
   // Creates the panel instance using the factory function
   _display = it->second(_pin_dc, _pin_rst, _pin_cs, _pin_sram_cs, _pin_busy,
                         &SPI, _thinkInkMode);
