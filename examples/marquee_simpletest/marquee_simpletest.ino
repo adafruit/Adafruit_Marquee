@@ -14,9 +14,13 @@ void setup() {
   mq_begin_status_t status = marquee.begin();
 
   Serial.begin(115200);
-  while (!Serial && millis() < 5000) {
+#if MARQUEE_DEBUG
+  // Production builds (-DMARQUEE_DEBUG=0) skip this and boot straight into connect()
+  unsigned long startSerial = millis();
+  while (!Serial && millis() - startSerial < 10000) {
     delay(10);
   }
+#endif // MARQUEE_DEBUG
   Serial.println("Adafruit Marquee");
 
   if (status != SUCCESS) {

@@ -226,7 +226,8 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
           SPIClass *spi, thinkinkmode_t mode) -> Adafruit_EPD * {
          auto *d =
              new Adafruit_UC8279(800, 480, dc, rst, cs, sram_cs, busy, spi);
-         d->begin(mode);
+         (void)mode;
+         d->begin(true);
          return d;
        }}};
   return adafruitEPDFactory;
@@ -880,6 +881,7 @@ bool Adafruit_Marquee::createEPD(const char *panel) {
   // in the config file
   if (_pin_sclk >= 0 || _pin_mosi >= 0)
     SPI.begin(_pin_sclk, _pin_miso, _pin_mosi, /*ss=*/-1);
+
   // Creates the panel instance using the factory function
   _display = it->second(_pin_dc, _pin_rst, _pin_cs, _pin_sram_cs, _pin_busy,
                         &SPI, _thinkInkMode);
