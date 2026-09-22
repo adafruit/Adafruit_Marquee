@@ -1,7 +1,5 @@
 # Adafruit Marquee Library [![Build CI](https://github.com/adafruit/Adafruit_Marquee/actions/workflows/build.yml/badge.svg)](https://github.com/adafruit/Adafruit_Marquee/actions) [![Documentation](https://github.com/adafruit/ci-arduino/blob/master/assets/doxygen_badge.svg)](http://adafruit.github.io/Adafruit_Marquee/html/index.html) [![MemBrowse](https://membrowse.com/badge.svg)](https://membrowse.com/public/adafruit/Adafruit_Marquee)
 
-NOTE: This library is **not** ready for public consumption yet. Stay tuned!
-
 Arduino client library for Marquee. Adafruit Marquee allows you to visually create interfaces for e-paper displays without writing any code or storing images, fonts, or layouts on the device. 
 
 **How Marquee Works**: The interface is created in the Marquee web app, and stored on [Adafruit IO](https://io.adafruit.com) feeds you create. The device fetches the interface from the cloud, and renders it on the e-paper display. Marquee also handles sleeping the device to save power, and waking it up to fetch new content when needed.
