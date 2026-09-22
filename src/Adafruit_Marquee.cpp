@@ -452,7 +452,7 @@ bool Adafruit_Marquee::initMqtt() {
     return false;
   }
 
-  if (!_mqtt->setKeepAliveInterval(MQ_MQTT_KEEPALIVE_SEC)) {
+  if (!_mqtt->setKeepAliveInterval(MQ_MQTT_KEEPALIVE_MS * 0.001)) {
     MQ_DEBUG_PRINTLN("[mqtt] ERROR: could not set the keepalive interval");
     return false;
   }

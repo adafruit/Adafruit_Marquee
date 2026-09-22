@@ -1,7 +1,4 @@
-// Adafruit Marquee simple test
-//
-// Skeleton sketch for local PlatformIO development against the
-// Adafruit MagTag 2.9".
+// Adafruit Marquee Application
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_Marquee_WiFi.h>
@@ -15,7 +12,6 @@ void setup() {
 
   Serial.begin(115200);
 #if MARQUEE_DEBUG
-  // Production builds (-DMARQUEE_DEBUG=0) skip this and boot straight into connect()
   unsigned long startSerial = millis();
   while (!Serial && millis() - startSerial < 10000) {
     delay(10);

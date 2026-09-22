@@ -35,10 +35,6 @@
 #define MQ_DEBUG_PRINT(...) Serial.print(__VA_ARGS__)     ///< Debug, no newline
 #define MQ_DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__) ///< Debug + newline
 #define MQ_DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)   ///< Formatted debug
-// Adafruit_USBD_CDC::flush() only hands the TX FIFO to the USB IN endpoint and
-// returns; it does not wait for the host to poll it. Callers that pull USB down
-// straight after (see disconnectBeforeSleep()) would drop the last few lines
-// with the bus, so hold the bus up long enough for the host to read them.
 #define MQ_DEBUG_FLUSH()                                                       \
   do {                                                                         \
     Serial.flush();                                                            \
@@ -71,7 +67,7 @@
 #define MQ_IO_HOST "io.adafruit.com" ///< Adafruit IO MQTT server address
 #define MQ_IO_MQTT_PORT 8883         ///< Adafruit IO MQTT server port
 
-#define MQ_MQTT_KEEPALIVE_SEC 180 ///< Keepalive, in seconds
+#define MQ_MQTT_KEEPALIVE_MS 180000 ///< MQTT server keepalive, in milliseconds
 #define MQ_WIFI_RETRY_MS                                                       \
   5000 ///< Minimum wait between WiFi association attempts, in milliseconds.
 #define MQ_MQTT_RETRY_MS                                                       \
