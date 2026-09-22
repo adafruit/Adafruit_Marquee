@@ -732,7 +732,7 @@ void Adafruit_Marquee::handleConnection() {
   _mqtt->processPackets(100);
 
   // Attempt to ping the broker within the keepalive interval.
-  if (millis() - _last_ping >= (MQ_MQTT_KEEPALIVE_SEC * 1000UL) / 4) {
+  if (millis() - _last_ping >= (MQ_MQTT_KEEPALIVE_MS / 4)) {
     _last_ping = millis();
     _mqtt->ping();
   }
