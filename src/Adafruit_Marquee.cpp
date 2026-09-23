@@ -216,8 +216,8 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
       {"420-tricolor-MFGNR",
        [](int16_t dc, int16_t rst, int16_t cs, int16_t sram_cs, int16_t busy,
           SPIClass *spi, thinkinkmode_t mode) -> Adafruit_EPD * {
-         auto *d = new ThinkInk_420_Tricolor_MFGNR(dc, rst, cs, sram_cs,
-                                                       busy, spi);
+         auto *d =
+             new ThinkInk_420_Tricolor_MFGNR(dc, rst, cs, sram_cs, busy, spi);
          d->begin(mode);
          return d;
        }},
