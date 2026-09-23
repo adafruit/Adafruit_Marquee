@@ -10,13 +10,13 @@ Adafruit_Marquee_WiFi marquee;
 void setup() {
   mq_begin_status_t status = marquee.begin();
 
-  Serial.begin(115200);
-#if MARQUEE_DEBUG
+  /*
   unsigned long startSerial = millis();
   while (!Serial && millis() - startSerial < 10000) {
     delay(10);
   }
-#endif // MARQUEE_DEBUG
+  */
+  Serial.begin(115200);
   Serial.println("Adafruit Marquee");
 
   if (status != SUCCESS) {
