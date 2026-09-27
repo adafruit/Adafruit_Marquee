@@ -24,6 +24,9 @@ MIT license, all text above must be included in any redistribution
 
 Marquee is open-source and welcomes contributions! If you want to build and test the library locally, you can use [PlatformIO](https://platformio.org/).
 
+`platformio.ini` links `Adafruit_MQTT_Library` and `Adafruit_EPD` from sibling folders. Clone them next to this repo, using the repos and branches in `.github/workflows/build.yml`. pioarduino needs Python 3.10 to 3.13.
+
+Debug output is on USB CDC at 115200 baud and needs DTR set, which `pio device monitor` does.
 
 #### Adding a New Board to Marquee
 Adding a new board to Marquee should be done via adding to the `platformio.ini` file, under the `[env]` section. 
