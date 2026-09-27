@@ -1051,11 +1051,12 @@ bool Adafruit_Marquee::enableTimerWakeup(uint64_t wakeup_time_sec) {
 }
 
 /*!
-    @brief  Tears down MQTT session and USB before entering sleep.
+    @brief  Tears down MQTT session, WiFi and USB before entering sleep.
 */
 void Adafruit_Marquee::disconnectBeforeSleep() {
   flash.syncDevice();
   _mqtt->disconnect();
+  _disconnect();
   // Blocks until the host has had a chance to read the pending log lines,
   // otherwise the detach() below drops them along with the bus.
   MQ_DEBUG_FLUSH();

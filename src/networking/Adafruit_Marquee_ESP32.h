@@ -73,14 +73,17 @@ protected:
       WiFi.mode(WIFI_STA);
       _mode_set = true;
     }
-    _disconnect();
+    WiFi.disconnect();
     WiFi.begin(_ssid, _pass);
   }
 
   /*!
-      @brief  Disconnects from the wireless network.
+      @brief  Disconnects from the wireless network and stops the radio.
   */
-  void _disconnect() { WiFi.disconnect(); }
+  void _disconnect() {
+    WiFi.disconnect(true);
+    _mode_set = false;
+  }
 
   WiFiClientSecure *_mqtt_client_secure =
       nullptr;            ///< Instance of secure WiFiClient
