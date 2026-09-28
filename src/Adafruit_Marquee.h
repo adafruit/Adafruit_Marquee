@@ -73,7 +73,7 @@
 #define MQ_MQTT_RETRY_MS                                                       \
   10000 ///< Minimum wait between MQTT connect attempts, in milliseconds.
 #define MQ_WIFI_POLL_MS                                                        \
-  3000 ///< How often to re-check for an association while connecting, in ms.
+  100 ///< How often to re-check for an association while connecting, in ms.
 
 typedef enum {
   SUCCESS = 0,
