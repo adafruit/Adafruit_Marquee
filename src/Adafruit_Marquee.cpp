@@ -234,7 +234,8 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
           SPIClass *spi, thinkinkmode_t mode) -> Adafruit_EPD * {
          auto *d =
              new ThinkInk_290_Grayscale4_T5(dc, rst, cs, sram_cs, busy, spi);
-         d->begin(mode);
+         // Mono mode renders a solid black screen on this panel, use gray4
+         d->begin(mode == THINKINK_MONO ? THINKINK_GRAYSCALE4 : mode);
          return d;
        }},
       {"xteink-x4-pro",
@@ -708,7 +709,9 @@ bool Adafruit_Marquee::publishStatus(const char *payload) {
     return false;
   }
 
-  Adafruit_MQTT_Publish pub_status(_mqtt, _topic_status);
+  // QoS 1 waits for the broker's PUBACK, so the "sleeping" status is delivered
+  // before disconnectBeforeSleep() drops WiFi
+  Adafruit_MQTT_Publish pub_status(_mqtt, _topic_status, MQTT_QOS_1);
   if (!pub_status.publish(payload)) {
     MQ_DEBUG_PRINTLN("[status] ERROR: Publish failed");
     return false;
@@ -978,6 +981,7 @@ bool Adafruit_Marquee::createEPD(const char *panel) {
                                     _pin_mosi >= 0 ? _pin_mosi : MOSI,
                                     _pin_sclk >= 0 ? _pin_sclk : SCK);
     panel = is_ssd1680 ? "magtag-2025" : "magtag-pre-2025";
+    MQ_DEBUG_PRINTF("[epd] Detected MagTag panel: %s\n", panel);
   }
 
   // Look up the panel identifier in the factory table and create the instance
