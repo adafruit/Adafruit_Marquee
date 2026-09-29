@@ -836,7 +836,28 @@ mq_begin_status_t Adafruit_Marquee::parseDisplayCfg(File32 &cfg) {
   }
 
   JsonObject display = _cfg_doc["display"];
+
+  // NOTE: `rotation` may be provided as (0 thru 3) or in degrees (0 thru 270)
   _rotation = display["rotation"] | 0;
+  if (_rotation > 3) {
+    // Rotation provided in degrees, convert to expected 0-3 range for
+    // setRotation() call
+    int degrees = display["rotation"];
+    switch (degrees) {
+    case 90:
+      _rotation = 1;
+      break;
+    case 180:
+      _rotation = 2;
+      break;
+    case 270:
+      _rotation = 3;
+      break;
+    default:
+      _rotation = 0;
+      break;
+    }
+  }
 
   const char *display_mode = display["mode"];
   if (!parseThinkInkMode(display_mode)) {
