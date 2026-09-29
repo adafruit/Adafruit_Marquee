@@ -229,6 +229,14 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
          d->begin(mode);
          return d;
        }},
+      {"magtag-pre-2025",
+       [](int16_t dc, int16_t rst, int16_t cs, int16_t sram_cs, int16_t busy,
+          SPIClass *spi, thinkinkmode_t mode) -> Adafruit_EPD * {
+         auto *d =
+             new ThinkInk_290_Grayscale4_T5(dc, rst, cs, sram_cs, busy, spi);
+         d->begin(mode);
+         return d;
+       }},
       {"xteink-x4-pro",
        [](int16_t dc, int16_t rst, int16_t cs, int16_t sram_cs, int16_t busy,
           SPIClass *spi, thinkinkmode_t mode) -> Adafruit_EPD * {
@@ -239,6 +247,71 @@ static const Adafruit_EPDFactory &getAdafruitEPDFactory() {
          return d;
        }}};
   return adafruitEPDFactory;
+}
+
+/*!
+    @brief  Detects if an SSD1680 EPD is connected using bit-banged SPI.
+    @param  cs    Chip Select pin number.
+    @param  dc    Data/Command pin number.
+    @param  rst   Reset pin number, or -1 if unused.
+    @param  mosi  SPI MOSI pin number.
+    @param  sck   SPI clock pin number.
+    @return True if an SSD1680 is detected, False otherwise (IL0373 or different
+            EPD).
+*/
+static bool detectSSD1680(int16_t cs, int16_t dc, int16_t rst, int16_t mosi,
+                          int16_t sck) {
+  // Configure SPI pins to bit-bang
+  pinMode(mosi, OUTPUT);
+  pinMode(sck, OUTPUT);
+  pinMode(cs, OUTPUT);
+  pinMode(dc, OUTPUT);
+
+  // Reset the display
+  digitalWrite(cs, HIGH);
+  if (rst >= 0) {
+    pinMode(rst, OUTPUT);
+    digitalWrite(rst, HIGH);
+    delay(10);
+    digitalWrite(rst, LOW);
+    delay(10);
+    digitalWrite(rst, HIGH);
+    delay(200);
+  }
+
+  // Begin transaction by pulling cs and dc LOW
+  digitalWrite(cs, LOW);
+  digitalWrite(dc, LOW);
+  digitalWrite(mosi, LOW);
+  digitalWrite(sck, LOW);
+
+  // Write to read register 0x71
+  uint8_t cmd = 0x71;
+  for (int i = 0; i < 8; i++) {
+    digitalWrite(mosi, (cmd & (1 << (7 - i))) != 0);
+    digitalWrite(sck, HIGH);
+    digitalWrite(sck, LOW);
+  }
+
+  // Set DC high to indicate data and switch MOSI to input with PUR in case
+  // SSD1680 does not send data back
+  pinMode(mosi, INPUT_PULLUP);
+  digitalWrite(dc, HIGH);
+
+  // Read response from register
+  uint8_t status = 0;
+  for (int i = 0; i < 8; i++) {
+    status <<= 1;
+    if (digitalRead(mosi)) {
+      status |= 1;
+    }
+    digitalWrite(sck, HIGH);
+    digitalWrite(sck, LOW);
+  }
+  digitalWrite(cs, HIGH);
+  pinMode(mosi, OUTPUT);
+
+  return status == 0xFF;
 }
 
 /*!
@@ -897,6 +970,14 @@ mq_begin_status_t Adafruit_Marquee::parseDisplayCfg(File32 &cfg) {
 bool Adafruit_Marquee::createEPD(const char *panel) {
   if (!panel) {
     return false;
+  }
+
+  // Probe for the MagTag panel type before initializing the SPI bus
+  if (strcmp(panel, "magtag") == 0) {
+    bool is_ssd1680 = detectSSD1680(_pin_cs, _pin_dc, _pin_rst,
+                                    _pin_mosi >= 0 ? _pin_mosi : MOSI,
+                                    _pin_sclk >= 0 ? _pin_sclk : SCK);
+    panel = is_ssd1680 ? "magtag-2025" : "magtag-pre-2025";
   }
 
   // Look up the panel identifier in the factory table and create the instance
