@@ -1200,6 +1200,26 @@ void Adafruit_Marquee::handleSleep() {
     return;
   }
 
+  // If MQTT is not connected, try to reconnect up to 3 times so the "sleeping"
+  // status can reach IO
+  if (_mqtt && !_mqtt->connected()) {
+    MQ_DEBUG_PRINTLN("[sleep] MQTT disconnected, attempting to reconnect...");
+    for (uint8_t attempts = 0; attempts < 3 && !_mqtt->connected();
+         attempts++) {
+      // Attempt to reconnect to MQTT if the network is available
+      if (isNetConnected() || initWifi(MQ_WIFI_RETRY_MS)) {
+        connectMqtt();
+      }
+    }
+    // Hold off sleeping until the MQTT connection is re-established
+    if (!_mqtt->connected()) {
+      MQ_DEBUG_PRINTLN(
+          "[sleep] ERROR: MQTT still disconnected, sleeping anyway");
+    } else {
+      return;
+    }
+  }
+
   MQ_DEBUG_PRINTLN("[sleep] Entering sleep mode");
 
 #ifdef ARDUINO_ARCH_ESP32
