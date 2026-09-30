@@ -709,7 +709,6 @@ bool Adafruit_Marquee::publishStatus(const char *payload) {
     return false;
   }
 
-
   Adafruit_MQTT_Publish pub_status(_mqtt, _topic_status, MQTT_QOS_1);
   if (!pub_status.publish(payload)) {
     MQ_DEBUG_PRINTLN("[status] ERROR: Publish failed");
@@ -1221,7 +1220,8 @@ void Adafruit_Marquee::handleSleep() {
   char payload[128];
   size_t len = serializeJson(doc, payload, sizeof(payload));
   if (len == 0 || len >= sizeof(payload)) {
-    MQ_DEBUG_PRINTLN("[sleep] ERROR: could not serialize the status payload, sleeping anyway");
+    MQ_DEBUG_PRINTLN("[sleep] ERROR: could not serialize the status payload, "
+                     "sleeping anyway");
   } else {
     MQ_DEBUG_PRINTLN("[sleep] Publishing sleep payload...");
     bool published = false;
