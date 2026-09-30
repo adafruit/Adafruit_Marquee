@@ -709,8 +709,7 @@ bool Adafruit_Marquee::publishStatus(const char *payload) {
     return false;
   }
 
-  // QoS 1 waits for the broker's PUBACK, so the "sleeping" status is delivered
-  // before disconnectBeforeSleep() drops WiFi
+
   Adafruit_MQTT_Publish pub_status(_mqtt, _topic_status, MQTT_QOS_1);
   if (!pub_status.publish(payload)) {
     MQ_DEBUG_PRINTLN("[status] ERROR: Publish failed");
@@ -1222,11 +1221,17 @@ void Adafruit_Marquee::handleSleep() {
   char payload[128];
   size_t len = serializeJson(doc, payload, sizeof(payload));
   if (len == 0 || len >= sizeof(payload)) {
-    MQ_DEBUG_PRINTLN("[sleep] ERROR: could not serialize the status payload");
+    MQ_DEBUG_PRINTLN("[sleep] ERROR: could not serialize the status payload, sleeping anyway");
   } else {
-    MQ_DEBUG_PRINT("[sleep] Publishing sleep payload...");
-    publishStatus(payload);
-    MQ_DEBUG_PRINTLN("published!");
+    MQ_DEBUG_PRINTLN("[sleep] Publishing sleep payload...");
+    bool published = false;
+    for (uint8_t i = 0; i < 3 && !published; i++) {
+      published = publishStatus(payload);
+    }
+    if (!published) {
+      MQ_DEBUG_PRINTLN(
+          "[sleep] ERROR: Sleep status not sent to IO, sleeping anyway");
+    }
   }
 
   // NOTE/TODO: _sleep_alarm is parsed but not used yet. We only support wake
