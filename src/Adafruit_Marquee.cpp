@@ -464,14 +464,11 @@ mq_status_t Adafruit_Marquee::begin() {
  */
 mq_status_t Adafruit_Marquee::parseCreds() {
   _status = parseNetCreds();
-  if (_status != SUCCESS)
-    return _status;
-  _status = parseIOCreds();
-  if (_status != SUCCESS)
-    return _status;
-  if (!parseDeviceName())
-    return _status = ERR_INVALID_DEVICE_NAME;
-  return _status = SUCCESS;
+  if (_status == SUCCESS)
+    _status = parseIOCreds();
+  if (_status == SUCCESS && !parseDeviceName())
+    _status = ERR_INVALID_DEVICE_NAME;
+  return _status;
 }
 
 /*!
@@ -479,11 +476,11 @@ mq_status_t Adafruit_Marquee::parseCreds() {
  *        call.
  * @returns The mq_status_t of the last call.
  */
-mq_status_t Adafruit_Marquee::status() { return _status; }
+mq_status_t Adafruit_Marquee::getStatus() { return _status; }
 
 /*!
  * @brief Displays the last _status error on the screen and halts (keeping USB
- *        MSC open). Only call when status() is not SUCCESS.
+ *        MSC open). Only call when getStatus() is not SUCCESS.
  */
 void Adafruit_Marquee::displayStatus() {
   switch (_status) {
@@ -523,8 +520,9 @@ void Adafruit_Marquee::displayStatus() {
     break;
   }
 
-  while (1) {
-    delay(10);
+  for (;;) {
+    yield(); // Allows background USB/Wi-Fi tasks to run briefly
+    delay(1);
   }
 }
 
@@ -713,7 +711,7 @@ bool Adafruit_Marquee::connectMqtt() {
 /*!
  * @brief Connects to WiFi and the Adafruit IO MQTT broker.
  * @param timeout The maximum time to wait for a connection, in milliseconds.
- * @returns True if connection succeeded, otherwise false. See status() for
+ * @returns True if connection succeeded, otherwise false. See getStatus() for
  *          the reason.
  */
 bool Adafruit_Marquee::connect(unsigned long timeout) {
@@ -734,7 +732,6 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
     _status = ERR_IO_CONNECT;
     return false;
   }
-  _status = SUCCESS;
 
   // If we are waking from cold boot, push an empty buffer to clear the display
   // since there aren't any previous bitmaps to show or errors
@@ -742,6 +739,7 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
     _display->display();
   }
 
+  _status = SUCCESS;
   return true;
 }
 
@@ -1118,10 +1116,12 @@ mq_status_t Adafruit_Marquee::parseNetCreds() {
   _pass = _cfg_doc["network"]["wifi_password"];
   if (!_ssid || !_pass)
     return ERR_MISSING_WIFI_CREDS;
-  // SSIDs are 1-32 chars, WPA passwords are 8-63 chars (empty for open)
+  // WPA passwords may be empty for open networks
+  size_t ssid_len = strlen(_ssid);
   size_t pass_len = strlen(_pass);
-  if (strlen(_ssid) == 0 || strlen(_ssid) > 32 ||
-      (pass_len > 0 && pass_len < 8) || pass_len > 63)
+  if (ssid_len == 0 || ssid_len > MQ_SSID_MAX_LEN ||
+      (pass_len > 0 && pass_len < MQ_WPA_PASS_MIN_LEN) ||
+      pass_len > MQ_WPA_PASS_MAX_LEN)
     return ERR_INVALID_WIFI_CREDS;
   return SUCCESS;
 }
@@ -1137,8 +1137,7 @@ mq_status_t Adafruit_Marquee::parseIOCreds() {
   _aio_key = _cfg_doc["adafruit_io"]["key"];
   if (!_aio_username || !_aio_key)
     return ERR_MISSING_IO_CREDS;
-  // Adafruit IO keys are 32 chars
-  if (strlen(_aio_username) == 0 || strlen(_aio_key) != 32)
+  if (strlen(_aio_username) == 0 || strlen(_aio_key) != MQ_IO_KEY_LEN)
     return ERR_INVALID_IO_CREDS;
   return SUCCESS;
 }

@@ -75,6 +75,11 @@
 #define MQ_WIFI_POLL_MS                                                        \
   100 ///< How often to re-check for an association while connecting, in ms.
 
+#define MQ_SSID_MAX_LEN 32     ///< Maximum length of a WiFi SSID, in chars
+#define MQ_WPA_PASS_MIN_LEN 8  ///< Minimum length of a WPA password, in chars
+#define MQ_WPA_PASS_MAX_LEN 63 ///< Maximum length of a WPA password, in chars
+#define MQ_IO_KEY_LEN 32       ///< Length of an Adafruit IO key, in chars
+
 typedef enum {
   SUCCESS = 0,
   ERR_FS_UNFORMATTED = -1,
@@ -118,7 +123,7 @@ public:
   mq_status_t begin();
   mq_status_t parseCreds();
   bool connect(unsigned long timeout = 30000);
-  mq_status_t status();
+  mq_status_t getStatus();
   void displayStatus();
   void run();
 

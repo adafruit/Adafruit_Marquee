@@ -37,7 +37,7 @@ void setup() {
 
   Serial.flush();
   marquee.connect();
-  status = marquee.status();
+  status = marquee.getStatus();
   if (status != SUCCESS) {
     Serial.printf("Failed to connect to WiFi and/or the MQTT broker: %d\n",
                   status);
