@@ -340,7 +340,7 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _aio_key = nullptr;
 
   _thinkInkMode = THINKINK_MONO;
-  _begin_status = SUCCESS;
+  _status = SUCCESS;
   _pin_cs = -1;
   _pin_dc = -1;
   _pin_rst = -1;
@@ -404,11 +404,12 @@ void Adafruit_Marquee::marqueeBoardPowerUp() {
 #endif // MARQUEE_BOARD_XTEINK_X4_PRO
 
 /*!
- * @brief Initializes the Marquee client.
+ * @brief Initializes the filesystem, USB MSC, and display. Errors from here
+ *        happen before the display is up, so they can only be logged.
  * @returns SUCCESS if initialization succeeded, otherwise the
- *          mq_begin_status_t describing the failure.
+ *          mq_status_t describing the failure.
  */
-mq_begin_status_t Adafruit_Marquee::begin() {
+mq_status_t Adafruit_Marquee::begin() {
 #if defined(MARQUEE_BOARD_XTEINK_X4_PRO)
   marqueeBoardPowerUp();
 #endif
@@ -418,62 +419,113 @@ mq_begin_status_t Adafruit_Marquee::begin() {
   delay(500);
 
   // Init. the flash and mount the file system on it
-  _begin_status = initFilesystem();
-  if (_begin_status == ERR_FLASH_INIT) {
+  _status = initFilesystem();
+  if (_status == ERR_FLASH_INIT) {
     // Failed, attach USB for debugging over serial
     TinyUSBDevice.attach();
     delay(500);
-    return _begin_status;
+    return _status;
   }
 
+  // Still expose an unformatted drive so the host can format it
   initUSBMSC();
-  if (_begin_status != SUCCESS) {
-    return _begin_status;
-  }
+  if (_status != SUCCESS)
+    return _status;
 
-  // Attempt to open and parse the marquee config file
+  // Bring up the display
   File32 cfg = fatfs.open("/cfg-marquee.json", O_RDONLY);
-  if (!cfg) {
-    _begin_status = ERR_FS_NO_CFG_FILE;
-    return _begin_status;
-  }
+  if (!cfg)
+    return _status = ERR_FS_NO_CFG_FILE;
 
-  if (parseDisplayCfg(cfg) != SUCCESS) {
-    return _begin_status;
-  }
+  _status = parseDisplayCfg(cfg);
+  if (_status != SUCCESS)
+    return _status;
 
   const char *display_panel = _cfg_doc["display"]["panel"];
-  if (!createEPD(display_panel)) {
-    _begin_status = ERR_EPD_PANEL_UNSUPPORTED;
-    return _begin_status;
-  }
+  if (!createEPD(display_panel))
+    return _status = ERR_EPD_PANEL_UNSUPPORTED;
 
+  // Configure the display using the parsed settings
   _display->setRotation(_rotation);
   _display->setTextSize(3);
   _display->setTextColor(EPD_BLACK);
   _display->setTextWrap(false);
   _height = _display->height();
   _width = _display->width();
-  _display->clearBuffer();
-  // If we are cold booting - push an empty buffer to the display
-  if (!didWakeFromSleep()) {
-    _display->display();
+
+  return _status = SUCCESS;
+}
+
+/*!
+ * @brief Parses the network, Adafruit IO, and device name settings from the
+ *        Marquee config file. Call after begin() and before connect().
+ * @returns SUCCESS if all were found, otherwise the mq_status_t describing
+ *          the failure.
+ */
+mq_status_t Adafruit_Marquee::parseCreds() {
+  _status = parseNetCreds();
+  if (_status != SUCCESS)
+    return _status;
+  _status = parseIOCreds();
+  if (_status != SUCCESS)
+    return _status;
+  if (!parseDeviceName())
+    return _status = ERR_INVALID_DEVICE_NAME;
+  return _status = SUCCESS;
+}
+
+/*!
+ * @brief Returns the status of the last begin(), parseCreds(), or connect()
+ *        call.
+ * @returns The mq_status_t of the last call.
+ */
+mq_status_t Adafruit_Marquee::status() { return _status; }
+
+/*!
+ * @brief Displays the last _status error on the screen and halts (keeping USB
+ *        MSC open). Only call when status() is not SUCCESS.
+ */
+void Adafruit_Marquee::displayStatus() {
+  switch (_status) {
+  case ERR_MISSING_WIFI_CREDS:
+    displayErrorMsg("WiFi Error",
+                    "Missing WiFi credentials in cfg-marquee.json",
+                    "SSID: ", _ssid);
+    break;
+  case ERR_INVALID_WIFI_CREDS:
+    displayErrorMsg("WiFi Error",
+                    "Invalid WiFi credentials in cfg-marquee.json",
+                    "SSID: ", _ssid);
+    break;
+  case ERR_MISSING_IO_CREDS:
+    displayErrorMsg("IO Error", "Missing IO credentials in cfg-marquee.json",
+                    "Username: ", _aio_username);
+    break;
+  case ERR_INVALID_IO_CREDS:
+    displayErrorMsg("IO Error", "Invalid IO credentials in cfg-marquee.json",
+                    "Username: ", _aio_username);
+    break;
+  case ERR_INVALID_DEVICE_NAME:
+    displayErrorMsg("Config Error", "Missing device name in cfg-marquee.json");
+    break;
+  case ERR_MQTT_INIT:
+    displayErrorMsg("IO Error", "Could not set up the MQTT client");
+    break;
+  case ERR_WIFI_CONNECT:
+    displayErrorMsg("WiFi Error", "Could not connect to the network",
+                    "SSID: ", _ssid);
+    break;
+  case ERR_IO_CONNECT:
+    displayErrorMsg("IO Error", "Could not connect to AIO",
+                    "Username: ", _aio_username);
+    break;
+  default:
+    break;
   }
 
-  // Parse network and Adafruit IO credentials
-  _ssid = _cfg_doc["network"]["wifi_ssid"];
-  _pass = _cfg_doc["network"]["wifi_password"];
-  _aio_username = _cfg_doc["adafruit_io"]["username"];
-  _aio_key = _cfg_doc["adafruit_io"]["key"];
-  _device_name = _cfg_doc["name"];
-  // Validate
-  if (!_ssid || !_pass || !_aio_username || !_aio_key || !_device_name) {
-    _begin_status = ERR_INVALID_CREDS;
-    return _begin_status;
+  while (1) {
+    delay(10);
   }
-
-  _begin_status = SUCCESS;
-  return _begin_status;
 }
 
 /*!
@@ -481,7 +533,7 @@ mq_begin_status_t Adafruit_Marquee::begin() {
     @return SUCCESS, ERR_FLASH_INIT if there is no usable flash partition, or
             ERR_FS_UNFORMATTED if the volume could not be formatted or mounted.
 */
-mq_begin_status_t Adafruit_Marquee::initFilesystem() {
+mq_status_t Adafruit_Marquee::initFilesystem() {
   if (!flash.begin() || flash.size() == 0) {
     return ERR_FLASH_INIT;
   }
@@ -661,21 +713,36 @@ bool Adafruit_Marquee::connectMqtt() {
 /*!
  * @brief Connects to WiFi and the Adafruit IO MQTT broker.
  * @param timeout The maximum time to wait for a connection, in milliseconds.
- * @returns True if connection succeeded, otherwise false.
+ * @returns True if connection succeeded, otherwise false. See status() for
+ *          the reason.
  */
 bool Adafruit_Marquee::connect(unsigned long timeout) {
   if (!initMqtt()) {
     MQ_DEBUG_PRINTLN("Failed to initialize the MQTT client and feeds");
+    _status = ERR_MQTT_INIT;
     return false;
   }
 
   if (!initWifi(timeout)) {
+    _status = ERR_WIFI_CONNECT;
     return false;
   }
 
   // connectMqtt() also asks the feeds to republish, so there is nothing left
   // for this function to do once the session is up.
-  return connectMqtt();
+  if (!connectMqtt()) {
+    _status = ERR_IO_CONNECT;
+    return false;
+  }
+  _status = SUCCESS;
+
+  // If we are waking from cold boot, push an empty buffer to clear the display
+  // since there aren't any previous bitmaps to show or errors
+  if (!didWakeFromSleep()) {
+    _display->display();
+  }
+
+  return true;
 }
 
 /*!
@@ -747,6 +814,46 @@ void Adafruit_Marquee::storeBmpCRC(uint32_t crc) {
 #else
   (void)crc;
 #endif // ARDUINO_ARCH_ESP32
+}
+
+/*!
+    @brief  Clears the panel and draws an error message on it, scaled to the
+            panel size.
+    @param  title    The error title, drawn large.
+    @param  details  The error details, drawn smaller and wrapped.
+    @param  label    Optional label for a config value (e.g. "SSID: "), drawn
+                     below the details at half their size.
+    @param  value    The config value drawn after the label, or nullptr to
+                     draw "(missing)".
+*/
+void Adafruit_Marquee::displayErrorMsg(const char *title, const char *details,
+                                       const char *label, const char *value) {
+  if (!_display || !title || !details)
+    return;
+  size_t title_len = strlen(title);
+
+  // Resize the title text for the panel
+  int title_size = _width / (6 * (title_len ? title_len : 1));
+  title_size = max(1, min(title_size, _height / 24));
+
+  // Write the title and detail text to the display
+  _display->clearBuffer();
+  _display->setTextSize(title_size);
+  _display->setCursor(0, 0);
+  _display->print(title);
+  int details_size = max(1, title_size / 2);
+  _display->setTextSize(details_size);
+  _display->setTextWrap(true);
+  _display->setCursor(0, title_size * 10);
+  _display->print(details);
+  if (label) {
+    // Start on the line after the details, with a small gap
+    _display->setTextSize(max(1, details_size / 2));
+    _display->setCursor(0, _display->getCursorY() + details_size * 12);
+    _display->print(label);
+    _display->print(value ? value : "(missing)");
+  }
+  _display->display();
 }
 
 /*!
@@ -899,14 +1006,13 @@ void Adafruit_Marquee::cbSleepMsg(char *data, size_t len) {
             and display interface configuration.
     @param  cfg  The opened Marquee config file. Closed before returning.
     @return SUCCESS if the display configuration was parsed, otherwise the
-            mq_begin_status_t describing the failure.
+            mq_status_t describing the failure.
 */
-mq_begin_status_t Adafruit_Marquee::parseDisplayCfg(File32 &cfg) {
+mq_status_t Adafruit_Marquee::parseDisplayCfg(File32 &cfg) {
   DeserializationError error = deserializeJson(_cfg_doc, cfg);
   cfg.close();
   if (error) {
-    _begin_status = ERR_JSON_DESERIALIZATION;
-    return _begin_status;
+    return ERR_JSON_DESERIALIZATION;
   }
 
   JsonObject display = _cfg_doc["display"];
@@ -935,8 +1041,7 @@ mq_begin_status_t Adafruit_Marquee::parseDisplayCfg(File32 &cfg) {
 
   const char *display_mode = display["mode"];
   if (!parseThinkInkMode(display_mode)) {
-    _begin_status = ERR_TI_MODE_UNSUPPORTED;
-    return _begin_status;
+    return ERR_TI_MODE_UNSUPPORTED;
   }
 
   // Attempt to parse SPI interface
@@ -944,8 +1049,7 @@ mq_begin_status_t Adafruit_Marquee::parseDisplayCfg(File32 &cfg) {
   const char *interface_type = interface["type"];
   if (!interface_type || (strcmp(interface_type, "spi_epd") != 0 &&
                           strcmp(interface_type, "builtin") != 0)) {
-    _begin_status = ERR_IFACE_UNSUPPORTED;
-    return _begin_status;
+    return ERR_IFACE_UNSUPPORTED;
   }
 
   JsonObject pins = interface["pins"];
@@ -958,8 +1062,7 @@ mq_begin_status_t Adafruit_Marquee::parseDisplayCfg(File32 &cfg) {
   _pin_mosi = pins["mosi"] | -1;
   _pin_miso = pins["miso"] | -1;
 
-  _begin_status = SUCCESS;
-  return _begin_status;
+  return SUCCESS;
 }
 
 /*!
@@ -1002,6 +1105,51 @@ bool Adafruit_Marquee::createEPD(const char *panel) {
   }
 
   return true;
+}
+
+/*!
+ * @brief Parses the network credentials from the Marquee config file.
+ * @returns SUCCESS, ERR_MISSING_WIFI_CREDS if the SSID or password is not in
+ *          the config file, or ERR_INVALID_WIFI_CREDS if either is the wrong
+ *          length.
+ */
+mq_status_t Adafruit_Marquee::parseNetCreds() {
+  _ssid = _cfg_doc["network"]["wifi_ssid"];
+  _pass = _cfg_doc["network"]["wifi_password"];
+  if (!_ssid || !_pass)
+    return ERR_MISSING_WIFI_CREDS;
+  // SSIDs are 1-32 chars, WPA passwords are 8-63 chars (empty for open)
+  size_t pass_len = strlen(_pass);
+  if (strlen(_ssid) == 0 || strlen(_ssid) > 32 ||
+      (pass_len > 0 && pass_len < 8) || pass_len > 63)
+    return ERR_INVALID_WIFI_CREDS;
+  return SUCCESS;
+}
+
+/*!
+ * @brief Parses the Adafruit IO credentials from the Marquee config file.
+ * @returns SUCCESS, ERR_MISSING_IO_CREDS if the username or key is not in the
+ *          config file, or ERR_INVALID_IO_CREDS if the username is empty or
+ *          the key is the wrong length.
+ */
+mq_status_t Adafruit_Marquee::parseIOCreds() {
+  _aio_username = _cfg_doc["adafruit_io"]["username"];
+  _aio_key = _cfg_doc["adafruit_io"]["key"];
+  if (!_aio_username || !_aio_key)
+    return ERR_MISSING_IO_CREDS;
+  // Adafruit IO keys are 32 chars
+  if (strlen(_aio_username) == 0 || strlen(_aio_key) != 32)
+    return ERR_INVALID_IO_CREDS;
+  return SUCCESS;
+}
+
+/*!
+ * @brief Parses the device name from the Marquee config file.
+ * @returns true if the device name was found, otherwise false.
+ */
+bool Adafruit_Marquee::parseDeviceName() {
+  _device_name = _cfg_doc["name"];
+  return _device_name;
 }
 
 /*!

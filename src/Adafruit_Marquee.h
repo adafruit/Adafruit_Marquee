@@ -83,9 +83,19 @@ typedef enum {
   ERR_TI_MODE_UNSUPPORTED = -4,
   ERR_IFACE_UNSUPPORTED = -5,
   ERR_EPD_PANEL_UNSUPPORTED = -6,
-  ERR_INVALID_CREDS = -7,
+  ERR_INVALID_WIFI_CREDS = -7,
   ERR_FLASH_INIT = -8,
-} mq_begin_status_t; ///< Return codes for Adafruit_Marquee::begin()
+  ERR_INVALID_IO_CREDS = -9,
+  ERR_INVALID_DEVICE_NAME = -10,
+  ERR_MQTT_INIT = -11,
+  ERR_WIFI_CONNECT = -12,
+  ERR_IO_CONNECT = -13,
+  ERR_MISSING_WIFI_CREDS = -14,
+  ERR_MISSING_IO_CREDS = -15,
+} mq_status_t; ///< Return codes for Adafruit_Marquee begin(), parseCreds(),
+               ///< and connect()
+
+typedef mq_status_t mq_begin_status_t; ///< Deprecated, use mq_status_t
 
 typedef enum {
   SLEEP_ALARM_NONE = 0,
@@ -105,8 +115,11 @@ class Adafruit_Marquee {
 public:
   Adafruit_Marquee();
   virtual ~Adafruit_Marquee();
-  mq_begin_status_t begin();
+  mq_status_t begin();
+  mq_status_t parseCreds();
   bool connect(unsigned long timeout = 30000);
+  mq_status_t status();
+  void displayStatus();
   void run();
 
   // Platform-specific networking interface
@@ -125,13 +138,16 @@ protected:
   static Adafruit_Marquee *_instance; ///< Pointer to the instance that the MQTT
                                       ///< callbacks dispatch to
   static bool fs_formatted;
-  mq_begin_status_t _begin_status;
+  mq_status_t _status;
   JsonDocument _cfg_doc;
   // USB MSC and Filesystem API
-  mq_begin_status_t initFilesystem();
+  mq_status_t initFilesystem();
   void initUSBMSC();
 
   // Networking API
+  mq_status_t parseNetCreds();
+  mq_status_t parseIOCreds();
+  bool parseDeviceName();
   bool initWifi(unsigned long timeout);
   bool connectMqtt();
   bool initMqtt();
@@ -143,11 +159,14 @@ protected:
 #endif
 
   // ThinkInk panel API
-  mq_begin_status_t parseDisplayCfg(File32 &cfg);
+  mq_status_t parseDisplayCfg(File32 &cfg);
   bool createEPD(const char *panel);
   bool parseThinkInkMode(const char *mode);
   bool decodeb64Bmp(const char *b64, size_t b64_len);
   void drawBitmap();
+  void displayErrorMsg(const char *title, const char *details,
+                       const char *label = nullptr,
+                       const char *value = nullptr);
   Adafruit_ImageReader_EPD _reader; ///< In-memory BMP decoder for the EPD
   Adafruit_EPD *_display;           ///< Pointer to the EPD display object
   thinkinkmode_t _thinkInkMode;     ///< ThinkInk mode for the display
