@@ -8,7 +8,7 @@
 Adafruit_Marquee_WiFi marquee;
 
 void setup() {
-  mq_begin_status_t status = marquee.begin();
+  mq_status_t status = marquee.begin();
 
   /*
   unsigned long startSerial = millis();
@@ -26,14 +26,22 @@ void setup() {
     }
   }
   Serial.printf("Marquee begin() returned: %d\n", status);
+
+  status = marquee.parseCreds();
+  if (status != SUCCESS) {
+    Serial.printf("Invalid credentials in cfg-marquee.json: %d\n", status);
+    marquee.displayStatus();
+  }
+
   Serial.println("Calling marquee.connect()...");
 
   Serial.flush();
-  if (!marquee.connect()) {
-    Serial.println("Failed to connect to WiFi and/or the MQTT broker");
-    while (1) {
-      delay(10);
-    }
+  marquee.connect();
+  status = marquee.getStatus();
+  if (status != SUCCESS) {
+    Serial.printf("Failed to connect to WiFi and/or the MQTT broker: %d\n",
+                  status);
+    marquee.displayStatus();
   }
 
   Serial.println("Connected, running marquee app loop()...");
