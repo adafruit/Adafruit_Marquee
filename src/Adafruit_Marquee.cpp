@@ -30,8 +30,12 @@ static RTC_DATA_ATTR uint32_t
     prvBmpCrc; ///< CRC32 of the bitmap, stored before sleep
 #endif         // ARDUINO_ARCH_ESP32
 
+// Debug Delay -- allow time for usb to settle to see all the debug output
+// #define DEBUG_DELAY 1
+
 // Battery monitor. Only the MagTag is wired up so far; any board that defines
 // MQ_HAS_BATT_MONITOR, MQ_BATT_PIN and MQ_BATT_DIVIDER gets reporting.
+// All other boards just execute empty code -- xxxBattery() calls are NOPs
 #if defined(ARDUINO_MAGTAG29_ESP32S2)
 #define MQ_HAS_BATT_MONITOR 1
 #define MQ_BATT_PIN BATT_MONITOR // GPIO4 / A5, ADC1 so it's usable with WiFi on
@@ -188,7 +192,7 @@ static bool formatFilesystem() {
     @param  volts  Battery voltage, in volts.
     @return Estimated charge, 0-100 percent.
 */
-static uint8_t battPercent(float volts) {
+static uint8_t convertBatteryVoltsToPercent(float volts) {
   // Resting-voltage curve, linearly interpolated. Good to ~10%, which is
   // as good as a voltage-only estimate gets.
   static const struct {
@@ -401,7 +405,7 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _batt_as_percent = true;
   _batt_pending = false;
   _batt_volts = -1.0f;
-  _batt_feed = nullptr;
+  _feed_name_battery = nullptr;
   _topic_batt[0] = '\0';
 }
 
@@ -483,6 +487,10 @@ mq_status_t Adafruit_Marquee::begin() {
   _status = parseDisplayCfg(cfg);
   if (_status != SUCCESS)
     return _status;
+
+#ifdef DEBUG_DLEAY
+  delay(3000);
+#endif
 
   // Sample the battery now, before the EPD refresh or the radio load it down
   parseBatteryCfg();
@@ -667,9 +675,9 @@ bool Adafruit_Marquee::initMqtt() {
 
   // Build battery feed (publish only), if enabled
   if (_batt_enabled) {
-    if (_batt_feed && _batt_feed[0] != '\0') {
+    if (_feed_name_battery && _feed_name_battery[0] != '\0') {
       snprintf(_topic_batt, sizeof(_topic_batt), "%s/f/%s", _aio_username,
-               _batt_feed);
+               _feed_name_battery);
     } else {
       snprintf(_topic_batt, sizeof(_topic_batt), "%s/f/%s.battery",
                _aio_username, _device_name);
@@ -856,17 +864,22 @@ bool Adafruit_Marquee::publishStatus(const char *payload) {
             battery monitor.
 */
 void Adafruit_Marquee::parseBatteryCfg() {
+#ifdef MQ_HAS_BATT_MONITOR
   JsonObject batt = _cfg_doc["battery"];
-  if (!(batt["enabled"] | false)) {
+  if (!batt) {
     return;
   }
-#ifdef MQ_HAS_BATT_MONITOR
+  bool en = batt["enabled"] | false;
+  if (!en) {
+    return; // This happens when battery.enabled is false or missing so don't log an error
+  }
+  MQ_DEBUG_PRINTLN("[batt] Battery enabled");
   _batt_enabled = true;
-  _batt_feed = batt["feed"]; // nullptr -> "<name>.battery"
+  // Battery feed is optional and defaults to group.battery if not set
+  _feed_name_battery = batt["feed"].as<const char *>();   // nullptr if missing or not a string
+  // Assume percent unless user sets units to volts or Volts
   const char *units = batt["units"] | "percent";
-  _batt_as_percent = strcmp(units, "volts") != 0;
-#else
-  MQ_DEBUG_PRINTLN("[batt] No battery monitor on this board, ignoring");
+  _batt_as_percent = (strcmp(units, "volts") != 0 && strcmp(units, "Volts") != 0);
 #endif
 }
 
@@ -886,7 +899,7 @@ void Adafruit_Marquee::sampleBattery() {
   _batt_volts = (mv / (float)MQ_BATT_SAMPLES) * MQ_BATT_DIVIDER / 1000.0f;
   _batt_pending = true;
   MQ_DEBUG_PRINTF("[batt] %.3f V, ~%u%%\n", _batt_volts,
-                  (unsigned)battPercent(_batt_volts));
+                  (unsigned)convertBatteryVoltsToPercent(_batt_volts));
 #endif
 }
 
@@ -903,7 +916,7 @@ void Adafruit_Marquee::publishBattery() {
   char payload[16];
   if (_batt_as_percent) {
     snprintf(payload, sizeof(payload), "%u",
-             (unsigned)battPercent(_batt_volts));
+             (unsigned)convertBatteryVoltsToPercent(_batt_volts));
   } else {
     snprintf(payload, sizeof(payload), "%.2f", _batt_volts);
   }
