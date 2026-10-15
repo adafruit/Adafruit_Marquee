@@ -100,6 +100,8 @@ static void msc_flush_cb(void) {
 extern "C" {
 /**
     @brief  Gets the current status of the disk.
+    @param  pdrv  Physical drive number (unused, there is only one).
+    @returns 0, the disk is always ready.
 */
 DSTATUS disk_status(BYTE pdrv) {
   (void)pdrv;
@@ -108,19 +110,34 @@ DSTATUS disk_status(BYTE pdrv) {
 
 /**
     @brief  Initializes the disk.
+    @param  pdrv  Physical drive number (unused, there is only one).
+    @returns 0, the flash is already initialized.
 */
 DSTATUS disk_initialize(BYTE pdrv) {
   (void)pdrv;
   return 0;
 }
 
+/**
+    @brief  Reads sectors from the disk.
+    @param  pdrv    Physical drive number (unused, there is only one).
+    @param  buff    Buffer to read the sectors into.
+    @param  sector  First sector to read.
+    @param  count   Number of sectors to read.
+    @returns RES_OK on success, RES_ERROR otherwise.
+*/
 DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count) {
   (void)pdrv;
   return flash.readBlocks(sector, buff, count) ? RES_OK : RES_ERROR;
 }
 
 /**
-    @brief  Reads sectors from the disk.
+    @brief  Writes sectors to the disk.
+    @param  pdrv    Physical drive number (unused, there is only one).
+    @param  buff    Data to write.
+    @param  sector  First sector to write.
+    @param  count   Number of sectors to write.
+    @returns RES_OK on success, RES_ERROR otherwise.
 */
 DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count) {
   (void)pdrv;
@@ -129,6 +146,11 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count) {
 
 /**
     @brief  I/O control for the disk.
+    @param  pdrv  Physical drive number (unused, there is only one).
+    @param  cmd   Control command: CTRL_SYNC, GET_SECTOR_COUNT,
+                  GET_SECTOR_SIZE or GET_BLOCK_SIZE.
+    @param  buff  Buffer that receives the requested value.
+    @returns RES_OK on success, RES_PARERR for an unsupported command.
 */
 DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff) {
   (void)pdrv;
