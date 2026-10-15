@@ -1158,9 +1158,10 @@ mq_status_t Adafruit_Marquee::parseNetCreds() {
 mq_status_t Adafruit_Marquee::parseIOCreds() {
   _aio_username = _cfg_doc["adafruit_io"]["username"];
   _aio_key = _cfg_doc["adafruit_io"]["key"];
-  if (!_aio_username || !_aio_key)
+  // Check for nullptr first, so an absent field is never dereferenced
+  if (_aio_username == nullptr || _aio_key == nullptr)
     return ERR_MISSING_IO_CREDS;
-  if (strlen(_aio_username) == 0 || strlen(_aio_key) == 0)
+  if (_aio_username[0] == '\0' || _aio_key[0] == '\0')
     return ERR_INVALID_IO_CREDS;
   return SUCCESS;
 }
