@@ -878,7 +878,7 @@ void Adafruit_Marquee::parseBatteryCfg() {
   _batt_enabled = true;
   // Battery feed is optional and defaults to group.battery if not set
   _feed_name_battery =
-      batt["feed"].as<const char *>();   // nullptr if missing or not a string
+      batt["feed"].as<const char *>(); // nullptr if missing or not a string
   // Assume percent unless user sets units to volts or Volts
   const char *units = batt["units"] | "percent";
   _batt_as_percent =

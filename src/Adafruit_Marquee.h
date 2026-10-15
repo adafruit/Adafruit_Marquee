@@ -253,7 +253,7 @@ private:
   bool _batt_as_percent; ///< Publish percent (true) or volts (false)
   bool _batt_pending;    ///< True while a sample is waiting to be published
   float _batt_volts;     ///< Last battery sample, in volts, or < 0 if none
-  const char 
+  const char
       *_feed_name_battery; ///< Optional feed key override from the config
   char _topic_batt[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>
 
