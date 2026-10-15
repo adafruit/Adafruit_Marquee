@@ -78,7 +78,6 @@
 #define MQ_SSID_MAX_LEN 32     ///< Maximum length of a WiFi SSID, in chars
 #define MQ_WPA_PASS_MIN_LEN 8  ///< Minimum length of a WPA password, in chars
 #define MQ_WPA_PASS_MAX_LEN 63 ///< Maximum length of a WPA password, in chars
-#define MQ_IO_KEY_LEN 32       ///< Length of an Adafruit IO key, in chars
 
 typedef enum {
   SUCCESS = 0,

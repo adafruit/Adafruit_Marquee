@@ -1129,15 +1129,16 @@ mq_status_t Adafruit_Marquee::parseNetCreds() {
 /*!
  * @brief Parses the Adafruit IO credentials from the Marquee config file.
  * @returns SUCCESS, ERR_MISSING_IO_CREDS if the username or key is not in the
- *          config file, or ERR_INVALID_IO_CREDS if the username is empty or
- *          the key is the wrong length.
+ *          config file, or ERR_INVALID_IO_CREDS if either is empty. The key's
+ *          length is not checked: legacy Adafruit IO keys differ in length
+ *          from current ones, and the broker rejects a bad key on connect.
  */
 mq_status_t Adafruit_Marquee::parseIOCreds() {
   _aio_username = _cfg_doc["adafruit_io"]["username"];
   _aio_key = _cfg_doc["adafruit_io"]["key"];
   if (!_aio_username || !_aio_key)
     return ERR_MISSING_IO_CREDS;
-  if (strlen(_aio_username) == 0 || strlen(_aio_key) != MQ_IO_KEY_LEN)
+  if (strlen(_aio_username) == 0 || strlen(_aio_key) == 0)
     return ERR_INVALID_IO_CREDS;
   return SUCCESS;
 }
