@@ -790,13 +790,13 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
   // unavailable broker gets a few quick retries first; IO's rate limit and ban
   // do not, since connecting again sooner only extends them.
   bool connected = connectMqtt();
-  for (uint8_t attempt = 1;
-       !connected && attempt < MQ_MQTT_CONNECT_ATTEMPTS &&
-       mqttRetrySoon(_mqtt_rc);
+  for (uint8_t attempt = 1; !connected && attempt < MQ_MQTT_CONNECT_ATTEMPTS &&
+                            mqttRetrySoon(_mqtt_rc);
        attempt++) {
     MQ_DEBUG_PRINTF("[mqtt] retrying in %lu s (attempt %u of %u)\n",
                     (unsigned long)(MQ_MQTT_RETRY_MS / 1000),
-                    (unsigned)(attempt + 1), (unsigned)MQ_MQTT_CONNECT_ATTEMPTS);
+                    (unsigned)(attempt + 1),
+                    (unsigned)MQ_MQTT_CONNECT_ATTEMPTS);
     delay(MQ_MQTT_RETRY_MS);
     if (!isNetConnected() && !initWifi(timeout)) {
       _status = ERR_WIFI_CONNECT;

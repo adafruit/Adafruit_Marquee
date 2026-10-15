@@ -225,17 +225,17 @@ protected:
   Adafruit_MQTT_Client *_mqtt; ///< MQTT client, owns the packet buffer
   unsigned long _last_ping; ///< The last time a PINGREQ was sent to the broker,
                             ///< in millis()
-  unsigned long _last_wifi_attempt;  ///< The last time a WiFi association was
-                                     ///< attempted, in millis()
-  unsigned long _last_mqtt_attempt;  ///< The last time an MQTT connection was
-                                     ///< attempted, in millis()
-  unsigned long _mqtt_retry_ms;      ///< How long to wait before retrying MQTT
-                                     ///< connection, in milliseconds
+  unsigned long _last_wifi_attempt; ///< The last time a WiFi association was
+                                    ///< attempted, in millis()
+  unsigned long _last_mqtt_attempt; ///< The last time an MQTT connection was
+                                    ///< attempted, in millis()
+  unsigned long _mqtt_retry_ms;     ///< How long to wait before retrying MQTT
+                                    ///< connection, in milliseconds
   int8_t _mqtt_rc; ///< Result of the last MQTT connect, 0 on success; see
                    ///< Adafruit_MQTT::connectErrorString()
   unsigned long _connect_timeout; ///< The WiFi timeout connect() was given, in
                                   ///< milliseconds, reused by retryConnect()
-  Adafruit_MQTT_Subscribe *_sub_bmp; ///< Subscription for the bitmap topic
+  Adafruit_MQTT_Subscribe *_sub_bmp;   ///< Subscription for the bitmap topic
   Adafruit_MQTT_Subscribe *_sub_sleep; ///< Subscription for the sleep topic
   bool _awaiting_bmp;   ///< True while this session's bitmap feed /get is still
                         ///< unanswered
