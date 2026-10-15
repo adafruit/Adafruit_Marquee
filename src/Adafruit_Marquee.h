@@ -26,7 +26,7 @@
 #include <map>
 
 #ifndef MARQUEE_DEBUG
-#define MARQUEE_DEBUG 1
+#define MARQUEE_DEBUG 1 ///< Set to 0 to compile out the serial debug output
 #endif
 #define MQ_USB_DRAIN_MS                                                        \
   150 ///< How long to let the host read the CDC TX FIFO before detaching USB,
@@ -78,40 +78,48 @@
 #define MQ_SSID_MAX_LEN 32     ///< Maximum length of a WiFi SSID, in chars
 #define MQ_WPA_PASS_MIN_LEN 8  ///< Minimum length of a WPA password, in chars
 #define MQ_WPA_PASS_MAX_LEN 63 ///< Maximum length of a WPA password, in chars
-#define MQ_IO_KEY_LEN 32       ///< Length of an Adafruit IO key, in chars
 
+/*!
+ * @brief Return codes for Adafruit_Marquee begin(), parseCreds(), and
+ *        connect()
+ */
 typedef enum {
-  SUCCESS = 0,
-  ERR_FS_UNFORMATTED = -1,
-  ERR_FS_NO_CFG_FILE = -2,
-  ERR_JSON_DESERIALIZATION = -3,
-  ERR_TI_MODE_UNSUPPORTED = -4,
-  ERR_IFACE_UNSUPPORTED = -5,
-  ERR_EPD_PANEL_UNSUPPORTED = -6,
-  ERR_INVALID_WIFI_CREDS = -7,
-  ERR_FLASH_INIT = -8,
-  ERR_INVALID_IO_CREDS = -9,
-  ERR_INVALID_DEVICE_NAME = -10,
-  ERR_MQTT_INIT = -11,
-  ERR_WIFI_CONNECT = -12,
-  ERR_IO_CONNECT = -13,
-  ERR_MISSING_WIFI_CREDS = -14,
-  ERR_MISSING_IO_CREDS = -15,
-} mq_status_t; ///< Return codes for Adafruit_Marquee begin(), parseCreds(),
-               ///< and connect()
+  SUCCESS = 0,                    ///< No error
+  ERR_FS_UNFORMATTED = -1,        ///< The filesystem is not formatted
+  ERR_FS_NO_CFG_FILE = -2,        ///< cfg-marquee.json was not found
+  ERR_JSON_DESERIALIZATION = -3,  ///< cfg-marquee.json is not valid JSON
+  ERR_TI_MODE_UNSUPPORTED = -4,   ///< The display mode is not supported
+  ERR_IFACE_UNSUPPORTED = -5,     ///< The display interface is not supported
+  ERR_EPD_PANEL_UNSUPPORTED = -6, ///< The display panel is not supported
+  ERR_INVALID_WIFI_CREDS = -7,    ///< The WiFi SSID or password is invalid
+  ERR_FLASH_INIT = -8,            ///< The flash chip could not be started
+  ERR_INVALID_IO_CREDS = -9,      ///< The IO username or key is empty
+  ERR_INVALID_DEVICE_NAME = -10,  ///< The device name is missing
+  ERR_MQTT_INIT = -11,            ///< The MQTT client could not be set up
+  ERR_WIFI_CONNECT = -12,         ///< Could not connect to the WiFi network
+  ERR_IO_CONNECT = -13,           ///< Could not connect to Adafruit IO
+  ERR_MISSING_WIFI_CREDS = -14,   ///< The WiFi credentials are missing
+  ERR_MISSING_IO_CREDS = -15,     ///< The IO username or key is missing
+} mq_status_t;
 
 typedef mq_status_t mq_begin_status_t; ///< Deprecated, use mq_status_t
 
+/*!
+ * @brief Sleep alarm types
+ */
 typedef enum {
-  SLEEP_ALARM_NONE = 0,
-  SLEEP_ALARM_TIMER = 1,
-} mq_sleep_alarm_t; ///< Sleep alarm types
+  SLEEP_ALARM_NONE = 0,  ///< No wakeup alarm
+  SLEEP_ALARM_TIMER = 1, ///< Wake up after a timer expires
+} mq_sleep_alarm_t;
 
+/*!
+ * @brief Sleep modes
+ */
 typedef enum {
-  SLEEP_MODE_NONE = 0,
-  SLEEP_MODE_LIGHT = 1,
-  SLEEP_MODE_DEEP = 2,
-} mq_sleep_mode_t; ///< Sleep modes
+  SLEEP_MODE_NONE = 0,  ///< Do not sleep
+  SLEEP_MODE_LIGHT = 1, ///< Light sleep
+  SLEEP_MODE_DEEP = 2,  ///< Deep sleep
+} mq_sleep_mode_t;
 
 /*!
  * @brief Client for the Adafruit IO Marquee feature.
@@ -128,12 +136,16 @@ public:
   void run();
 
   // Platform-specific networking interface
-  virtual bool isNetConnected() = 0; ///< Returns true if the network interface
-                                     ///< is connected to a network, False
-                                     ///< otherwise
-  virtual const char *
-  connectionType() = 0; ///< Returns a string describing the network interface
-                        ///< type (e.g. "WiFi", "Ethernet", "BLE")
+  /*!
+   * @brief Checks whether the network interface is connected to a network.
+   * @returns True if connected, False otherwise.
+   */
+  virtual bool isNetConnected() = 0;
+  /*!
+   * @brief Describes the network interface type.
+   * @returns A string such as "WiFi", "Ethernet" or "BLE".
+   */
+  virtual const char *connectionType() = 0;
   virtual void
   setupMQTTClient() = 0; ///< Configures the platform adapter's MQTT client
 
@@ -142,9 +154,10 @@ public:
 protected:
   static Adafruit_Marquee *_instance; ///< Pointer to the instance that the MQTT
                                       ///< callbacks dispatch to
-  static bool fs_formatted;
-  mq_status_t _status;
-  JsonDocument _cfg_doc;
+  static bool fs_formatted;           ///< True if the filesystem is formatted
+  mq_status_t _status;   ///< Status of the last begin(), parseCreds(), or
+                         ///< connect() call
+  JsonDocument _cfg_doc; ///< Parsed contents of cfg-marquee.json
   // USB MSC and Filesystem API
   mq_status_t initFilesystem();
   void initUSBMSC();
@@ -217,11 +230,11 @@ protected:
                         ///< unanswered
   char _feed_name_bmp[MAX_IO_FEED_NAME_LEN];   ///< Feed key for the bitmap feed
   char _feed_name_sleep[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the sleep feed
-  char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];  ///< <user>/f/<feed>/csv
-  char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96];  ///< <user>/f/<feed>
+  char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];  ///< {user}/f/{feed}/csv
+  char _topic_sleep[MAX_IO_FEED_NAME_LEN + 96];  ///< {user}/f/{feed}
   char _feed_name_status[MAX_IO_FEED_NAME_LEN];  ///< Feed key for the status
                                                  ///< feed
-  char _topic_status[MAX_IO_FEED_NAME_LEN + 96]; ///< <user>/f/<feed>, no /csv:
+  char _topic_status[MAX_IO_FEED_NAME_LEN + 96]; ///< {user}/f/{feed}, no /csv:
                                                  ///< the payload is JSON
   static void cbBitmapMsg(char *data, size_t len);
   static void cbSleepMsg(char *data, size_t len);
@@ -229,8 +242,8 @@ protected:
   bool publishStatus(const char *payload);
 
   // Network interface within networking/
-  virtual void _connect() = 0;
-  virtual void _disconnect() = 0;
+  virtual void _connect() = 0;    ///< Connects the network interface
+  virtual void _disconnect() = 0; ///< Disconnects the network interface
 
   // Sleep API
   void handleSleep();
