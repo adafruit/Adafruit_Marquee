@@ -30,8 +30,7 @@ static RTC_DATA_ATTR uint32_t
     prvBmpCrc; ///< CRC32 of the bitmap, stored before sleep
 #endif         // ARDUINO_ARCH_ESP32
 
-// for flashTransport definition
-#define ADAFRUIT_MARQUEE_INTERNAL
+#define ADAFRUIT_MARQUEE_INTERNAL ///< Lets flash_config.h define flashTransport
 #include "flash_config.h"
 
 // Elm Chan's FatFs, vendored under src/fatfs/, is used only to format the
