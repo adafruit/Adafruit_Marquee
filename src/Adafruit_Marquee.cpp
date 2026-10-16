@@ -567,6 +567,12 @@ void Adafruit_Marquee::displayStatus() {
       }
       if (retryConnect()) {
         MQ_DEBUG_PRINTLN("[retry] connected");
+        // Clear the error off the panel, as a cold boot does in connect(). The
+        // bitmap then draws over a blank panel, or the panel stays blank if
+        // the feed has none, rather than showing an error that no longer
+        // applies.
+        _display->clearBuffer();
+        _display->display();
         return;
       }
       // Bad credentials only change when someone edits cfg-marquee.json, and
