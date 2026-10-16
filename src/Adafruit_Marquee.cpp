@@ -44,7 +44,7 @@ static RTC_DATA_ATTR uint32_t
 #define MQ_BATT_SAMPLES 16 ///< ADC samples averaged per battery reading
 
 // for flashTransport definition
-#define ADAFRUIT_MARQUEE_INTERNAL
+#define ADAFRUIT_MARQUEE_INTERNAL ///< Lets flash_config.h define flashTransport
 #include "flash_config.h"
 
 // Elm Chan's FatFs, vendored under src/fatfs/, is used only to format the
@@ -113,6 +113,8 @@ static void msc_flush_cb(void) {
 extern "C" {
 /**
     @brief  Gets the current status of the disk.
+    @param  pdrv  Physical drive number (unused, there is only one).
+    @returns 0, the disk is always ready.
 */
 DSTATUS disk_status(BYTE pdrv) {
   (void)pdrv;
@@ -121,19 +123,34 @@ DSTATUS disk_status(BYTE pdrv) {
 
 /**
     @brief  Initializes the disk.
+    @param  pdrv  Physical drive number (unused, there is only one).
+    @returns 0, the flash is already initialized.
 */
 DSTATUS disk_initialize(BYTE pdrv) {
   (void)pdrv;
   return 0;
 }
 
+/**
+    @brief  Reads sectors from the disk.
+    @param  pdrv    Physical drive number (unused, there is only one).
+    @param  buff    Buffer to read the sectors into.
+    @param  sector  First sector to read.
+    @param  count   Number of sectors to read.
+    @returns RES_OK on success, RES_ERROR otherwise.
+*/
 DRESULT disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count) {
   (void)pdrv;
   return flash.readBlocks(sector, buff, count) ? RES_OK : RES_ERROR;
 }
 
 /**
-    @brief  Reads sectors from the disk.
+    @brief  Writes sectors to the disk.
+    @param  pdrv    Physical drive number (unused, there is only one).
+    @param  buff    Data to write.
+    @param  sector  First sector to write.
+    @param  count   Number of sectors to write.
+    @returns RES_OK on success, RES_ERROR otherwise.
 */
 DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count) {
   (void)pdrv;
@@ -142,6 +159,11 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT count) {
 
 /**
     @brief  I/O control for the disk.
+    @param  pdrv  Physical drive number (unused, there is only one).
+    @param  cmd   Control command: CTRL_SYNC, GET_SECTOR_COUNT,
+                  GET_SECTOR_SIZE or GET_BLOCK_SIZE.
+    @param  buff  Buffer that receives the requested value.
+    @returns RES_OK on success, RES_PARERR for an unsupported command.
 */
 DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff) {
   (void)pdrv;
@@ -1278,15 +1300,17 @@ mq_status_t Adafruit_Marquee::parseNetCreds() {
 /*!
  * @brief Parses the Adafruit IO credentials from the Marquee config file.
  * @returns SUCCESS, ERR_MISSING_IO_CREDS if the username or key is not in the
- *          config file, or ERR_INVALID_IO_CREDS if the username is empty or
- *          the key is the wrong length.
+ *          config file, or ERR_INVALID_IO_CREDS if either is empty. The key's
+ *          length is not checked: legacy Adafruit IO keys differ in length
+ *          from current ones, and the broker rejects a bad key on connect.
  */
 mq_status_t Adafruit_Marquee::parseIOCreds() {
   _aio_username = _cfg_doc["adafruit_io"]["username"];
   _aio_key = _cfg_doc["adafruit_io"]["key"];
-  if (!_aio_username || !_aio_key)
+  // Check for nullptr first, so an absent field is never dereferenced
+  if (_aio_username == nullptr || _aio_key == nullptr)
     return ERR_MISSING_IO_CREDS;
-  if (strlen(_aio_username) == 0 || strlen(_aio_key) != MQ_IO_KEY_LEN)
+  if (strlen(_aio_username) == 0 || strlen(_aio_key) == 0)
     return ERR_INVALID_IO_CREDS;
   return SUCCESS;
 }
