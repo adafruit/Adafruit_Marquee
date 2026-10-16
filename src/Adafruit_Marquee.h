@@ -74,6 +74,12 @@
   10000 ///< Minimum wait between MQTT connect attempts, in milliseconds.
 #define MQ_WIFI_POLL_MS                                                        \
   100 ///< How often to re-check for an association while connecting, in ms.
+#define MQ_MQTT_CONNECT_ATTEMPTS                                               \
+  3 ///< MQTT connect attempts in connect() before it reports ERR_IO_CONNECT
+#define MQ_ERROR_RETRY_MIN_MS                                                  \
+  60000 ///< First wait before displayStatus() retries a failed connect, in ms
+#define MQ_ERROR_RETRY_MAX_MS                                                  \
+  900000 ///< Longest wait between displayStatus() connect retries, in ms
 
 #define MQ_SSID_MAX_LEN 32     ///< Maximum length of a WiFi SSID, in chars
 #define MQ_WPA_PASS_MIN_LEN 8  ///< Minimum length of a WPA password, in chars
@@ -170,6 +176,9 @@ protected:
   bool connectMqtt();
   bool initMqtt();
   void handleConnection();
+  bool retryConnect();
+  static bool mqttRetrySoon(int8_t rc);
+  static bool mqttRetryLater(int8_t rc);
 
   // Board-specific power rails
 #if defined(MARQUEE_BOARD_XTEINK_X4_PRO)
@@ -216,13 +225,17 @@ protected:
   Adafruit_MQTT_Client *_mqtt; ///< MQTT client, owns the packet buffer
   unsigned long _last_ping; ///< The last time a PINGREQ was sent to the broker,
                             ///< in millis()
-  unsigned long _last_wifi_attempt;  ///< The last time a WiFi association was
-                                     ///< attempted, in millis()
-  unsigned long _last_mqtt_attempt;  ///< The last time an MQTT connection was
-                                     ///< attempted, in millis()
-  unsigned long _mqtt_retry_ms;      ///< How long to wait before retrying MQTT
-                                     ///< connection, in milliseconds
-  Adafruit_MQTT_Subscribe *_sub_bmp; ///< Subscription for the bitmap topic
+  unsigned long _last_wifi_attempt; ///< The last time a WiFi association was
+                                    ///< attempted, in millis()
+  unsigned long _last_mqtt_attempt; ///< The last time an MQTT connection was
+                                    ///< attempted, in millis()
+  unsigned long _mqtt_retry_ms;     ///< How long to wait before retrying MQTT
+                                    ///< connection, in milliseconds
+  int8_t _mqtt_rc; ///< Result of the last MQTT connect, 0 on success; see
+                   ///< Adafruit_MQTT::connectErrorString()
+  unsigned long _connect_timeout; ///< The WiFi timeout connect() was given, in
+                                  ///< milliseconds, reused by retryConnect()
+  Adafruit_MQTT_Subscribe *_sub_bmp;   ///< Subscription for the bitmap topic
   Adafruit_MQTT_Subscribe *_sub_sleep; ///< Subscription for the sleep topic
   bool _awaiting_bmp;   ///< True while this session's bitmap feed /get is still
                         ///< unanswered

@@ -349,6 +349,8 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _last_wifi_attempt = 0;
   _last_mqtt_attempt = 0;
   _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
+  _mqtt_rc = 0;
+  _connect_timeout = 30000;
   _sub_bmp = nullptr;
   _sub_sleep = nullptr;
   _awaiting_bmp = false;
@@ -501,8 +503,11 @@ mq_status_t Adafruit_Marquee::parseCreds() {
 mq_status_t Adafruit_Marquee::getStatus() { return _status; }
 
 /*!
- * @brief Displays the last _status error on the screen and halts (keeping USB
- *        MSC open). Only call when getStatus() is not SUCCESS.
+ * @brief Displays the last _status error on the screen, keeping USB MSC open.
+ *        Only call when getStatus() is not SUCCESS. For ERR_WIFI_CONNECT and
+ *        for an ERR_IO_CONNECT that was not a credentials rejection, retries
+ *        the connection with a growing wait and returns once connected, with
+ *        getStatus() SUCCESS. For every other error, halts.
  */
 void Adafruit_Marquee::displayStatus() {
   switch (_status) {
@@ -540,6 +545,42 @@ void Adafruit_Marquee::displayStatus() {
     break;
   default:
     break;
+  }
+
+  // A failed connect is often temporary: a router rebooting, or IO refusing a
+  // board that reconnected too often. Halting on one would leave the board on
+  // this screen until someone pressed reset, so retry with a growing wait and
+  // return once connected. USB MSC stays open throughout, as it does below.
+  if (_status == ERR_WIFI_CONNECT ||
+      (_status == ERR_IO_CONNECT && mqttRetryLater(_mqtt_rc))) {
+    // The panel now shows this error, not the bitmap whose CRC is stored, so
+    // forget the CRC: on recovery the same bitmap must be drawn again rather
+    // than skipped as unchanged.
+    storeBmpCRC(0);
+    unsigned long wait = MQ_ERROR_RETRY_MIN_MS;
+    for (;;) {
+      MQ_DEBUG_PRINTF("[retry] connecting again in %lu s\n", wait / 1000);
+      unsigned long start = millis();
+      while (millis() - start < wait) {
+        yield();
+        delay(10);
+      }
+      if (retryConnect()) {
+        MQ_DEBUG_PRINTLN("[retry] connected");
+        // Clear the error off the panel, as a cold boot does in connect(). The
+        // bitmap then draws over a blank panel, or the panel stays blank if
+        // the feed has none, rather than showing an error that no longer
+        // applies.
+        _display->clearBuffer();
+        _display->display();
+        return;
+      }
+      // Bad credentials only change when someone edits cfg-marquee.json, and
+      // a reset picks that up, so stop retrying and halt below.
+      if (_status == ERR_IO_CONNECT && !mqttRetryLater(_mqtt_rc))
+        break;
+      wait = min(wait * 2, (unsigned long)MQ_ERROR_RETRY_MAX_MS);
+    }
   }
 
   for (;;) {
@@ -692,6 +733,7 @@ bool Adafruit_Marquee::initWifi(unsigned long timeout) {
 bool Adafruit_Marquee::connectMqtt() {
   _last_mqtt_attempt = millis();
   int8_t rc = _mqtt->connect();
+  _mqtt_rc = rc;
   _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
   if (rc != 0) {
     MQ_DEBUG_PRINT("[mqtt] connect failed: ");
@@ -737,6 +779,7 @@ bool Adafruit_Marquee::connectMqtt() {
  *          the reason.
  */
 bool Adafruit_Marquee::connect(unsigned long timeout) {
+  _connect_timeout = timeout;
   if (!initMqtt()) {
     MQ_DEBUG_PRINTLN("Failed to initialize the MQTT client and feeds");
     _status = ERR_MQTT_INIT;
@@ -749,8 +792,25 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
   }
 
   // connectMqtt() also asks the feeds to republish, so there is nothing left
-  // for this function to do once the session is up.
-  if (!connectMqtt()) {
+  // for this function to do once the session is up. A dropped connection or an
+  // unavailable broker gets a few quick retries first; IO's rate limit and ban
+  // do not, since connecting again sooner only extends them.
+  bool connected = connectMqtt();
+  for (uint8_t attempt = 1; !connected && attempt < MQ_MQTT_CONNECT_ATTEMPTS &&
+                            mqttRetrySoon(_mqtt_rc);
+       attempt++) {
+    MQ_DEBUG_PRINTF("[mqtt] retrying in %lu s (attempt %u of %u)\n",
+                    (unsigned long)(MQ_MQTT_RETRY_MS / 1000),
+                    (unsigned)(attempt + 1),
+                    (unsigned)MQ_MQTT_CONNECT_ATTEMPTS);
+    delay(MQ_MQTT_RETRY_MS);
+    if (!isNetConnected() && !initWifi(timeout)) {
+      _status = ERR_WIFI_CONNECT;
+      return false;
+    }
+    connected = connectMqtt();
+  }
+  if (!connected) {
     _status = ERR_IO_CONNECT;
     return false;
   }
@@ -761,6 +821,45 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
     _display->display();
   }
 
+  _status = SUCCESS;
+  return true;
+}
+
+/*!
+ * @brief Whether an MQTT connect failure is worth retrying within seconds.
+ * @param rc The result of Adafruit_MQTT::connect().
+ * @returns True for no connection at all (-1: TCP, TLS or no CONNACK) and for
+ *          "service unavailable" (3), which a short wait can fix.
+ */
+bool Adafruit_Marquee::mqttRetrySoon(int8_t rc) { return rc == -1 || rc == 3; }
+
+/*!
+ * @brief Whether an MQTT connect failure is worth retrying after a long wait.
+ * @param rc The result of Adafruit_MQTT::connect().
+ * @returns False for answers retrying cannot change: an unsupported protocol
+ *          (1), a rejected client id (2), and bad credentials (4, 5). True for
+ *          everything else, including IO's rate limit (6) and temporary ban
+ *          (7), which lift with time but get worse with quick retries.
+ */
+bool Adafruit_Marquee::mqttRetryLater(int8_t rc) {
+  return rc != 1 && rc != 2 && rc != 4 && rc != 5;
+}
+
+/*!
+ * @brief Reconnects after connect() failed, reusing the MQTT client and
+ *        subscriptions it already set up.
+ * @returns True once connected, with getStatus() SUCCESS; otherwise False,
+ *          with getStatus() ERR_WIFI_CONNECT or ERR_IO_CONNECT.
+ */
+bool Adafruit_Marquee::retryConnect() {
+  if (!isNetConnected() && !initWifi(_connect_timeout)) {
+    _status = ERR_WIFI_CONNECT;
+    return false;
+  }
+  if (!connectMqtt()) {
+    _status = ERR_IO_CONNECT;
+    return false;
+  }
   _status = SUCCESS;
   return true;
 }
