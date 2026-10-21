@@ -772,9 +772,10 @@ bool Adafruit_Marquee::initMqtt() {
   }
 
   // IO announces its data rate throttle and temporary bans on these topics.
-  // IO drops the session on a rejected publish, and more than 10 rejections a
-  // minute start a ban or lengthen it, so a notice holds off reconnects (each
-  // one publishes) and publishes until it lifts.
+  // A publish over the data rate is dropped with a notice and the session
+  // stays up, but more than 20 of them within 5 s start a ban, and a ban
+  // drops the session. So a notice holds off reconnects (each one publishes)
+  // and publishes until it lifts.
   snprintf(_topic_throttle, sizeof(_topic_throttle), "%s/throttle",
            _aio_username);
   snprintf(_topic_errors, sizeof(_topic_errors), "%s/errors", _aio_username);
@@ -1250,10 +1251,11 @@ void Adafruit_Marquee::handleConnection() {
     }
     MQ_DEBUG_PRINTLN("[mqtt] disconnected, reconnecting");
     // Each reconnect publishes the awake status and the /get requests, and
-    // all of them count toward IO's data rate. While the account is throttled
-    // IO drops the session on the first of them, so a fixed wait would keep
-    // reconnecting into rejections until IO bans the board. Double the wait
-    // on every reconnect; a session that stays up resets it, below.
+    // all of them count toward IO's data rate. A board that keeps losing its
+    // session would, on a fixed 10 s wait, keep publishing over that rate
+    // (more than 20 over it within 5 s is a ban) and hit IO's limit of 20
+    // connects a minute. Double the wait on every reconnect; a session that
+    // stays up resets it, below.
     _mqtt_retry_ms =
         min(_mqtt_retry_ms * 2, (unsigned long)MQ_MQTT_RETRY_MAX_MS);
     connectMqtt();
@@ -1763,8 +1765,9 @@ void Adafruit_Marquee::handleSleep() {
   }
 
   // If MQTT is not connected, try to reconnect up to 3 times so the "sleeping"
-  // status can reach IO. Not while IO is throttling or banning the board: the
-  // reconnect's own publishes would be rejected and lengthen the ban.
+  // status can reach IO. Not while IO is throttling or banning the board: a
+  // banned board cannot connect, and a throttled one's publishes would be
+  // dropped and count toward a ban.
   if (_mqtt && !_mqtt->connected() && !ioHoldActive()) {
     MQ_DEBUG_PRINTLN("[sleep] MQTT disconnected, attempting to reconnect...");
     for (uint8_t attempts = 0; attempts < 3 && !_mqtt->connected();
