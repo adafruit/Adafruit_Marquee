@@ -28,7 +28,11 @@ Adafruit_Marquee *Adafruit_Marquee::_instance =
 #include <esp_wifi.h>
 static RTC_DATA_ATTR uint32_t
     prvBmpCrc; ///< CRC32 of the bitmap, stored before sleep
-#endif         // ARDUINO_ARCH_ESP32
+static RTC_DATA_ATTR uint8_t
+    prvSleepMode; ///< Last sleep mode from the sleep feed, an mq_sleep_mode_t
+static RTC_DATA_ATTR uint64_t
+    prvSleepTime; ///< Last sleep time from the sleep feed, in seconds
+#endif            // ARDUINO_ARCH_ESP32
 
 // Debug Delay -- allow time for usb to settle to see all the debug output
 // #define DEBUG_DELAY 1
@@ -400,6 +404,8 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _sub_errors = nullptr;
   _awaiting_bmp = false;
   _awaiting_sleep = false;
+  _get_sent_at = 0;
+  _get_resent = false;
   _pending_bmp = nullptr;
   _pending_bmp_len = 0;
   _pending_crc = 0;
@@ -883,7 +889,13 @@ bool Adafruit_Marquee::connectMqtt() {
   // Ask for IO to republish the last data point on the bitmap feed.
   // handleSleep() holds a queued sleep until this reply lands, otherwise the
   // small sleep payload beats the ~21KB bitmap to the device and the panel
-  // never updates.
+  // never updates. checkFeedReplies() gives up on it if IO never answers. A
+  // reconnect while a reply is still due keeps the original deadline, or a
+  // flaky link could hold the board awake for good.
+  if (!_awaiting_bmp && !_awaiting_sleep) {
+    _get_sent_at = millis();
+    _get_resent = false;
+  }
   _awaiting_bmp = true;
   getFromFeed(_topic_bmp);
 
@@ -1016,6 +1028,56 @@ void Adafruit_Marquee::getFromFeed(const char *topic) {
   snprintf(get_topic, sizeof(get_topic), "%s/get", topic);
   Adafruit_MQTT_Publish pub_get(_mqtt, get_topic);
   pub_get.publish("\0");
+}
+
+/*!
+    @brief  Gives up on the bitmap and sleep feed /get replies once
+            MQ_GET_REPLY_TIMEOUT_MS has passed, so handleSleep() is not held
+            off for good. IO sends nothing back for a feed with no data yet,
+            such as a display that was provisioned but never pushed to, or
+            when the lookup fails. Unanswered /gets are re-sent once, half way
+            through.
+*/
+void Adafruit_Marquee::checkFeedReplies() {
+  if (!_awaiting_bmp && !_awaiting_sleep)
+    return;
+  unsigned long waited = millis() - _get_sent_at;
+
+  // Every /get counts toward IO's data rate, so re-send only once, and not
+  // while IO is throttling or banning the board.
+  if (!_get_resent && waited >= MQ_GET_REPLY_TIMEOUT_MS / 2 && _mqtt &&
+      _mqtt->connected() && !ioHoldActive()) {
+    _get_resent = true;
+    MQ_DEBUG_PRINTLN("[get] no reply yet, asking again");
+    if (_awaiting_bmp)
+      getFromFeed(_topic_bmp);
+    if (_awaiting_sleep)
+      getFromFeed(_topic_sleep);
+    return;
+  }
+  if (waited < MQ_GET_REPLY_TIMEOUT_MS)
+    return;
+
+  if (_awaiting_bmp) {
+    MQ_DEBUG_PRINTLN("[get] no bitmap reply, keeping the current panel");
+    _awaiting_bmp = false;
+  }
+  if (_awaiting_sleep) {
+    _awaiting_sleep = false;
+    if (_is_sleep_pending)
+      return;
+    // A config from this session, or from before a light sleep, is still in
+    // _sleep_mode. After a deep sleep it is only in RTC memory.
+    if (_sleep_mode != SLEEP_MODE_NONE || loadPrvSleepCfg()) {
+      MQ_DEBUG_PRINTLN("[get] no sleep reply, using the last sleep config");
+      _is_sleep_pending = true;
+    } else {
+      // Nothing has ever told this board to sleep, so it stays awake for a
+      // live publish, as it would with no sleep feed at all.
+      MQ_DEBUG_PRINTLN(
+          "[get] no sleep reply and no sleep config, staying awake");
+    }
+  }
 }
 
 /*!
@@ -1156,6 +1218,35 @@ void Adafruit_Marquee::storeBmpCRC(uint32_t crc) {
 }
 
 /*!
+    @brief  Restores the sleep config stored before the last sleep.
+    @return True if a config was stored and is now in _sleep_mode and
+            _sleep_time, False otherwise.
+*/
+bool Adafruit_Marquee::loadPrvSleepCfg() {
+#ifdef ARDUINO_ARCH_ESP32
+  if (!didWakeFromSleep() ||
+      (prvSleepMode != SLEEP_MODE_DEEP && prvSleepMode != SLEEP_MODE_LIGHT))
+    return false;
+  _sleep_mode = (mq_sleep_mode_t)prvSleepMode;
+  _sleep_time = prvSleepTime;
+  return true;
+#else
+  return false;
+#endif // ARDUINO_ARCH_ESP32
+}
+
+/*!
+    @brief  Records the current sleep config, so a wake from deep sleep can
+            fall back to it if the sleep feed does not answer.
+*/
+void Adafruit_Marquee::storeSleepCfg() {
+#ifdef ARDUINO_ARCH_ESP32
+  prvSleepMode = (uint8_t)_sleep_mode;
+  prvSleepTime = _sleep_time;
+#endif // ARDUINO_ARCH_ESP32
+}
+
+/*!
     @brief  Clears the panel and draws an error message on it, scaled to the
             panel size.
     @param  title    The error title, drawn large.
@@ -1286,6 +1377,8 @@ void Adafruit_Marquee::run() {
 
   // Draw any bitmap queued by the bitmap feed callback
   drawBitmap();
+  // Stop waiting on /get replies that IO never sent
+  checkFeedReplies();
   // Sleep, if the sleep feed asked for it. On deep sleep this does not return.
   handleSleep();
 }
@@ -1407,9 +1500,13 @@ void Adafruit_Marquee::cbSleepMsg(char *data, size_t len) {
   } else if (doc["sleep_mode"] == "light") {
     _instance->_sleep_mode = SLEEP_MODE_LIGHT;
   } else {
-    _instance->_sleep_mode = SLEEP_MODE_NONE;
+    // The editor only writes "light" or "deep". Anything else still asks the
+    // board to sleep, and on battery deep sleep is safer than staying awake.
+    MQ_DEBUG_PRINTLN("[sleep] unknown sleep_mode, using deep sleep");
+    _instance->_sleep_mode = SLEEP_MODE_DEEP;
   }
   _instance->_sleep_time = doc["sleep_time"] | 60;
+  _instance->storeSleepCfg();
   _instance->_is_sleep_pending = true;
   MQ_DEBUG_PRINTLN("[sleep] Sleep feed stored, sleep pending");
 }
@@ -1846,11 +1943,17 @@ void Adafruit_Marquee::handleSleep() {
     delay(500);
 
     if (rc != ESP_OK) {
-      MQ_DEBUG_PRINTF("[sleep] ERROR: could not enter light sleep: %d\n",
+      // The session is already down and "sleeping" already sent, so staying
+      // awake would leave the board idle until the sleep feed is republished.
+      // The timer wakeup is still armed, so deep sleep instead.
+      MQ_DEBUG_PRINTF("[sleep] ERROR: could not enter light sleep: %d, "
+                      "entering deep sleep instead\n",
                       (int)rc);
-      esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-      _is_sleep_pending = false;
-      return;
+      MQ_DEBUG_FLUSH();
+      TinyUSBDevice.detach();
+      delay(10);
+      esp_deep_sleep_start();
+      // Not reached: the chip resets on wake.
     }
 
     MQ_DEBUG_PRINTF("[sleep] wake reason: %s\n", wakeupReason());

@@ -90,6 +90,10 @@
 #define MQ_IO_HOLD_MAX_S                                                       \
   3600 ///< Longest hold taken from an IO notice, in seconds (IO's nominal
        ///< ban cap)
+#define MQ_GET_REPLY_TIMEOUT_MS                                                \
+  60000 ///< How long to wait for the bitmap and sleep feed /get replies before
+        ///< giving up on them, in ms. Unanswered ones are re-sent once, half
+        ///< way through.
 #define MQ_IO_NOTICE_SUB_LEN                                                   \
   256 ///< Holds a {user}/throttle or {user}/errors message, in bytes
 
@@ -268,6 +272,11 @@ protected:
                         ///< unanswered
   bool _awaiting_sleep; ///< True while this session's sleep feed /get is still
                         ///< unanswered
+  unsigned long _get_sent_at; ///< When the bitmap and sleep feed /gets were
+                              ///< first sent, in millis(). Not moved by a
+                              ///< reconnect while a reply is still due.
+  bool _get_resent;           ///< True once the unanswered /gets were re-sent
+  void checkFeedReplies();
   char _feed_name_bmp[MAX_IO_FEED_NAME_LEN];   ///< Feed key for the bitmap feed
   char _feed_name_sleep[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the sleep feed
   char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];  ///< {user}/f/{feed}/csv
@@ -299,6 +308,8 @@ protected:
 private:
   bool loadPrvBmpCRC(uint32_t &crc);
   void storeBmpCRC(uint32_t crc);
+  bool loadPrvSleepCfg();
+  void storeSleepCfg();
 
   // Battery reporting, opt-in via "battery": {"enabled": true} in the config.
   // A no-op on boards without a battery monitor.
