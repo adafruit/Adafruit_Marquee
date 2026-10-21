@@ -1375,10 +1375,12 @@ void Adafruit_Marquee::run() {
   // Keeps the WiFi and MQTT session up, dispatches any incoming feed messages
   handleConnection();
 
+  // Stop waiting on /get replies that IO never sent. This goes before the
+  // draw: a panel refresh blocks for tens of seconds, and a reply that lands
+  // meanwhile is only read on the next handleConnection().
+  checkFeedReplies();
   // Draw any bitmap queued by the bitmap feed callback
   drawBitmap();
-  // Stop waiting on /get replies that IO never sent
-  checkFeedReplies();
   // Sleep, if the sleep feed asked for it. On deep sleep this does not return.
   handleSleep();
 }
