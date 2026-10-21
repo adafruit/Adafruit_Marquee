@@ -543,6 +543,11 @@ mq_status_t Adafruit_Marquee::begin() {
   if (!createEPD(display_panel))
     return _status = ERR_EPD_PANEL_UNSUPPORTED;
 
+  // Adafruit_EPD::begin() leaves the frame buffer as-is. An SRAM buffer keeps
+  // the last image across a reset and is random after a power-on, so clear it
+  // before anything sends it to the panel.
+  _display->clearBuffer();
+
   // Configure the display using the parsed settings
   _display->setRotation(_rotation);
   _display->setTextSize(3);
