@@ -74,6 +74,36 @@
   10000 ///< Minimum wait between MQTT connect attempts, in milliseconds.
 #define MQ_WIFI_POLL_MS                                                        \
   100 ///< How often to re-check for an association while connecting, in ms.
+#define MQ_MQTT_CONNECT_ATTEMPTS                                               \
+  3 ///< MQTT connect attempts in connect() before it reports ERR_IO_CONNECT
+#define MQ_ERROR_RETRY_MIN_MS                                                  \
+  60000 ///< First wait before displayStatus() retries a failed connect, in ms
+#define MQ_ERROR_RETRY_MAX_MS                                                  \
+  900000 ///< Longest wait between displayStatus() connect retries, in ms
+#define MQ_MQTT_RETRY_MAX_MS                                                   \
+  300000 ///< Longest wait between handleConnection() reconnects, in ms
+#define MQ_MQTT_STABLE_MS                                                      \
+  60000 ///< A session up this long resets the reconnect wait, in ms
+#define MQ_IO_HOLD_DEFAULT_MS                                                  \
+  60000 ///< How long an IO throttle or ban notice with no duration holds off
+        ///< reconnects and publishes, in ms
+#define MQ_IO_HOLD_MAX_S                                                       \
+  3600 ///< Longest hold taken from an IO notice, in seconds (IO's nominal
+       ///< ban cap)
+#define MQ_GET_REPLY_TIMEOUT_MS                                                \
+  60000 ///< How long to wait for the bitmap and sleep feed /get replies before
+        ///< giving up on them, in ms. Unanswered ones are re-sent once, half
+        ///< way through.
+#define MQ_GET_REPLY_GRACE_MS                                                  \
+  15000 ///< The least time the /gets re-sent by a reconnect get before the
+        ///< deadline, in ms, enough for a ~21KB bitmap reply on a slow link
+#define MQ_SLEEP_MIN_S                                                         \
+  10 ///< Shortest sleep taken from the sleep feed, in seconds. Each wake
+     ///< reconnects and publishes, so a shorter cycle runs into IO's limits of
+     ///< 20 connects and 30 data points a minute, and a zero is too short for
+     ///< light sleep at all.
+#define MQ_IO_NOTICE_SUB_LEN                                                   \
+  256 ///< Holds a {user}/throttle or {user}/errors message, in bytes
 
 #define MQ_SSID_MAX_LEN 32     ///< Maximum length of a WiFi SSID, in chars
 #define MQ_WPA_PASS_MIN_LEN 8  ///< Minimum length of a WPA password, in chars
@@ -170,6 +200,11 @@ protected:
   bool connectMqtt();
   bool initMqtt();
   void handleConnection();
+  bool retryConnect();
+  static bool mqttRetrySoon(int8_t rc);
+  static bool mqttRetryLater(int8_t rc);
+  void holdForIONotice(const char *msg);
+  bool ioHoldActive();
 
   // Board-specific power rails
 #if defined(MARQUEE_BOARD_XTEINK_X4_PRO)
@@ -182,6 +217,7 @@ protected:
   bool parseThinkInkMode(const char *mode);
   bool decodeb64Bmp(const char *b64, size_t b64_len);
   void drawBitmap();
+  void drawStatus();
   void displayErrorMsg(const char *title, const char *details,
                        const char *label = nullptr,
                        const char *value = nullptr);
@@ -216,18 +252,44 @@ protected:
   Adafruit_MQTT_Client *_mqtt; ///< MQTT client, owns the packet buffer
   unsigned long _last_ping; ///< The last time a PINGREQ was sent to the broker,
                             ///< in millis()
-  unsigned long _last_wifi_attempt;  ///< The last time a WiFi association was
-                                     ///< attempted, in millis()
-  unsigned long _last_mqtt_attempt;  ///< The last time an MQTT connection was
-                                     ///< attempted, in millis()
-  unsigned long _mqtt_retry_ms;      ///< How long to wait before retrying MQTT
-                                     ///< connection, in milliseconds
-  Adafruit_MQTT_Subscribe *_sub_bmp; ///< Subscription for the bitmap topic
-  Adafruit_MQTT_Subscribe *_sub_sleep; ///< Subscription for the sleep topic
+  unsigned long _last_wifi_attempt; ///< The last time a WiFi association was
+                                    ///< attempted, in millis()
+  unsigned long _last_mqtt_attempt; ///< The last time an MQTT connection was
+                                    ///< attempted, in millis()
+  unsigned long _mqtt_retry_ms;     ///< How long to wait before retrying MQTT
+                                    ///< connection, in milliseconds
+  unsigned long _mqtt_connected_at; ///< When the current MQTT session came up,
+                                    ///< in millis()
+  int8_t _mqtt_rc; ///< Result of the last MQTT connect: 0 on success, -1 for
+                   ///< no connection (also the value before any attempt), -2
+                   ///< for a failed subscribe, else the broker's CONNACK
+                   ///< refusal; see Adafruit_MQTT::connectErrorString()
+  unsigned long _io_hold_start;   ///< When the last IO throttle or ban notice
+                                  ///< arrived, in millis()
+  unsigned long _io_hold_ms;      ///< How long that notice holds off reconnects
+                                  ///< and publishes, in ms; 0 for no hold
+  unsigned long _connect_timeout; ///< The WiFi timeout connect() was given, in
+                                  ///< milliseconds, reused by retryConnect()
+  Adafruit_MQTT_Subscribe *_sub_bmp;      ///< Subscription for the bitmap topic
+  Adafruit_MQTT_Subscribe *_sub_sleep;    ///< Subscription for the sleep topic
+  Adafruit_MQTT_Subscribe *_sub_throttle; ///< Subscription for IO's data rate
+                                          ///< throttle notices
+  Adafruit_MQTT_Subscribe *_sub_errors;   ///< Subscription for IO's error and
+                                          ///< ban notices
   bool _awaiting_bmp;   ///< True while this session's bitmap feed /get is still
                         ///< unanswered
   bool _awaiting_sleep; ///< True while this session's sleep feed /get is still
                         ///< unanswered
+  unsigned long _get_sent_at; ///< When the bitmap and sleep feed /gets were
+                              ///< first sent, in millis(). A reconnect while
+                              ///< a reply is still due only moves it enough
+                              ///< to leave MQ_GET_REPLY_GRACE_MS.
+  bool _get_resent;           ///< True once the unanswered /gets were re-sent
+  bool _get_held;             ///< True while an IO throttle or ban notice has
+                              ///< paused the wait, so the /gets are re-sent
+                              ///< and the deadline restarted once it lifts
+  void checkFeedReplies();
+  void sleepOnLastCfg();
   char _feed_name_bmp[MAX_IO_FEED_NAME_LEN];   ///< Feed key for the bitmap feed
   char _feed_name_sleep[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the sleep feed
   char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];  ///< {user}/f/{feed}/csv
@@ -236,8 +298,11 @@ protected:
                                                  ///< feed
   char _topic_status[MAX_IO_FEED_NAME_LEN + 96]; ///< {user}/f/{feed}, no /csv:
                                                  ///< the payload is JSON
+  char _topic_throttle[MAX_IO_FEED_NAME_LEN];    ///< {user}/throttle
+  char _topic_errors[MAX_IO_FEED_NAME_LEN];      ///< {user}/errors
   static void cbBitmapMsg(char *data, size_t len);
   static void cbSleepMsg(char *data, size_t len);
+  static void cbIONoticeMsg(char *data, size_t len);
   void getFromFeed(const char *topic);
   bool publishStatus(const char *payload);
 
@@ -249,6 +314,8 @@ protected:
   void handleSleep();
   bool _is_sleep_pending;        ///< True if a sleep request is pending, False
                                  ///< otherwise
+  bool _sleep_hold_logged;       ///< True once handleSleep() has logged that it
+                                 ///< is holding off for a /get reply
   mq_sleep_mode_t _sleep_mode;   ///< Sleep mode
   mq_sleep_alarm_t _sleep_alarm; ///< Sleep alarm type
   uint64_t _sleep_time;          ///< Sleep duration, in seconds
@@ -256,6 +323,8 @@ protected:
 private:
   bool loadPrvBmpCRC(uint32_t &crc);
   void storeBmpCRC(uint32_t crc);
+  bool loadPrvSleepCfg();
+  void storeSleepCfg();
 
   // Battery reporting, opt-in via "battery": {"enabled": true} in the config.
   // A no-op on boards without a battery monitor.

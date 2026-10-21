@@ -28,7 +28,13 @@ Adafruit_Marquee *Adafruit_Marquee::_instance =
 #include <esp_wifi.h>
 static RTC_DATA_ATTR uint32_t
     prvBmpCrc; ///< CRC32 of the bitmap, stored before sleep
-#endif         // ARDUINO_ARCH_ESP32
+static RTC_DATA_ATTR uint8_t
+    prvSleepMode; ///< Last sleep mode from the sleep feed, an mq_sleep_mode_t
+static RTC_DATA_ATTR uint8_t
+    prvSleepAlarm; ///< Last alarm type from the sleep feed, an mq_sleep_alarm_t
+static RTC_DATA_ATTR uint64_t
+    prvSleepTime; ///< Last sleep time from the sleep feed, in seconds
+#endif            // ARDUINO_ARCH_ESP32
 
 // Debug Delay -- allow time for usb to settle to see all the debug output
 // #define DEBUG_DELAY 1
@@ -389,10 +395,20 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _last_wifi_attempt = 0;
   _last_mqtt_attempt = 0;
   _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
+  _mqtt_connected_at = 0;
+  _mqtt_rc = -1; // No attempt yet; 0 would mean the broker accepted us
+  _io_hold_start = 0;
+  _io_hold_ms = 0;
+  _connect_timeout = 30000;
   _sub_bmp = nullptr;
   _sub_sleep = nullptr;
+  _sub_throttle = nullptr;
+  _sub_errors = nullptr;
   _awaiting_bmp = false;
   _awaiting_sleep = false;
+  _get_sent_at = 0;
+  _get_resent = false;
+  _get_held = false;
   _pending_bmp = nullptr;
   _pending_bmp_len = 0;
   _pending_crc = 0;
@@ -421,6 +437,7 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _sleep_mode = SLEEP_MODE_NONE;
   _sleep_alarm = SLEEP_ALARM_NONE;
   _is_sleep_pending = false;
+  _sleep_hold_logged = false;
   _sleep_time = 60; // default to 60 seconds to avoid rapid wake/sleep cycling
 
   _batt_enabled = false;
@@ -448,6 +465,10 @@ Adafruit_Marquee::~Adafruit_Marquee() {
   _sub_bmp = nullptr;
   delete _sub_sleep;
   _sub_sleep = nullptr;
+  delete _sub_throttle;
+  _sub_throttle = nullptr;
+  delete _sub_errors;
+  _sub_errors = nullptr;
   delete _mqtt;
   _mqtt = nullptr;
   if (_instance == this) {
@@ -522,6 +543,11 @@ mq_status_t Adafruit_Marquee::begin() {
   if (!createEPD(display_panel))
     return _status = ERR_EPD_PANEL_UNSUPPORTED;
 
+  // Adafruit_EPD::begin() leaves the frame buffer as-is. An SRAM buffer keeps
+  // the last image across a reset and is random after a power-on, so clear it
+  // before anything sends it to the panel.
+  _display->clearBuffer();
+
   // Configure the display using the parsed settings
   _display->setRotation(_rotation);
   _display->setTextSize(3);
@@ -556,10 +582,9 @@ mq_status_t Adafruit_Marquee::parseCreds() {
 mq_status_t Adafruit_Marquee::getStatus() { return _status; }
 
 /*!
- * @brief Displays the last _status error on the screen and halts (keeping USB
- *        MSC open). Only call when getStatus() is not SUCCESS.
+ * @brief Draws the error for the current _status on the panel.
  */
-void Adafruit_Marquee::displayStatus() {
+void Adafruit_Marquee::drawStatus() {
   switch (_status) {
   case ERR_MISSING_WIFI_CREDS:
     displayErrorMsg("WiFi Error",
@@ -595,6 +620,61 @@ void Adafruit_Marquee::displayStatus() {
     break;
   default:
     break;
+  }
+}
+
+/*!
+ * @brief Displays the last _status error on the screen, keeping USB MSC open.
+ *        Only call when getStatus() is not SUCCESS. For ERR_WIFI_CONNECT and
+ *        for an ERR_IO_CONNECT that was not a fatal rejection, retries the
+ *        connection with a growing wait and returns once connected, with
+ *        getStatus() SUCCESS. For every other error, halts.
+ */
+void Adafruit_Marquee::displayStatus() {
+  drawStatus();
+  mq_status_t shown = _status;
+
+  // A failed connect is often temporary: a router rebooting, or IO refusing a
+  // board that reconnected too often. Halting on one would leave the board on
+  // this screen until someone pressed reset, so retry with a growing wait and
+  // return once connected. USB MSC stays open throughout, as it does below.
+  if (_status == ERR_WIFI_CONNECT ||
+      (_status == ERR_IO_CONNECT && mqttRetryLater(_mqtt_rc))) {
+    // The panel now shows this error, not the bitmap whose CRC is stored, so
+    // forget the CRC: on recovery the same bitmap must be drawn again rather
+    // than skipped as unchanged.
+    storeBmpCRC(0);
+    unsigned long wait = MQ_ERROR_RETRY_MIN_MS;
+    for (;;) {
+      MQ_DEBUG_PRINTF("[retry] connecting again in %lu s\n", wait / 1000);
+      unsigned long start = millis();
+      while (millis() - start < wait) {
+        yield();
+        delay(10);
+      }
+      if (retryConnect()) {
+        MQ_DEBUG_PRINTLN("[retry] connected");
+        // Clear the error off the panel, as a cold boot does in connect(). The
+        // bitmap then draws over a blank panel, or the panel stays blank if
+        // the feed has none, rather than showing an error that no longer
+        // applies.
+        _display->clearBuffer();
+        _display->display(true);
+        return;
+      }
+      // A Wi-Fi error can turn into an IO error once the router is back, or
+      // the other way round. Redraw only then: e-ink refreshes are slow and
+      // flash the panel.
+      if (_status != shown) {
+        drawStatus();
+        shown = _status;
+      }
+      // Malformed credentials only change when someone edits cfg-marquee.json,
+      // and a reset picks that up, so stop retrying and halt below.
+      if (_status == ERR_IO_CONNECT && !mqttRetryLater(_mqtt_rc))
+        break;
+      wait = min(wait * 2, (unsigned long)MQ_ERROR_RETRY_MAX_MS);
+    }
   }
 
   for (;;) {
@@ -706,8 +786,29 @@ bool Adafruit_Marquee::initMqtt() {
     }
   }
 
+  // IO announces its data rate throttle and temporary bans on these topics.
+  // A publish over the data rate is dropped with a notice and the session
+  // stays up, but more than 20 of them within 5 s start a ban, and a ban
+  // drops the session. So a notice holds off reconnects (each one publishes)
+  // and publishes until it lifts.
+  snprintf(_topic_throttle, sizeof(_topic_throttle), "%s/throttle",
+           _aio_username);
+  snprintf(_topic_errors, sizeof(_topic_errors), "%s/errors", _aio_username);
+  _sub_throttle = new Adafruit_MQTT_Subscribe(_mqtt, _topic_throttle, 0,
+                                              MQ_IO_NOTICE_SUB_LEN);
+  _sub_errors = new Adafruit_MQTT_Subscribe(_mqtt, _topic_errors, 0,
+                                            MQ_IO_NOTICE_SUB_LEN);
+  if (!_sub_throttle || !_sub_throttle->lastread || !_sub_errors ||
+      !_sub_errors->lastread) {
+    MQ_DEBUG_PRINTLN("[io] ERROR: could not create the IO notice feeds");
+    return false;
+  }
+  _sub_throttle->setCallback(cbIONoticeMsg);
+  _sub_errors->setCallback(cbIONoticeMsg);
+
   // Attempt to register subscriptions
-  if (!_mqtt->subscribe(_sub_bmp) || !_mqtt->subscribe(_sub_sleep)) {
+  if (!_mqtt->subscribe(_sub_bmp) || !_mqtt->subscribe(_sub_sleep) ||
+      !_mqtt->subscribe(_sub_throttle) || !_mqtt->subscribe(_sub_errors)) {
     MQ_DEBUG_PRINTLN("Failed to register MQTT subscriptions");
     return false;
   }
@@ -716,6 +817,10 @@ bool Adafruit_Marquee::initMqtt() {
   MQ_DEBUG_PRINTLN(_topic_bmp);
   MQ_DEBUG_PRINT("Subscribed to sleep feed: ");
   MQ_DEBUG_PRINTLN(_topic_sleep);
+  MQ_DEBUG_PRINT("Subscribed to IO notices: ");
+  MQ_DEBUG_PRINT(_topic_throttle);
+  MQ_DEBUG_PRINT(", ");
+  MQ_DEBUG_PRINTLN(_topic_errors);
   MQ_DEBUG_PRINT("Publishing status to: ");
   MQ_DEBUG_PRINTLN(_topic_status);
   if (_batt_enabled) {
@@ -762,11 +867,33 @@ bool Adafruit_Marquee::initWifi(unsigned long timeout) {
 bool Adafruit_Marquee::connectMqtt() {
   _last_mqtt_attempt = millis();
   int8_t rc = _mqtt->connect();
-  _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
+  _mqtt_rc = rc;
   if (rc != 0) {
     MQ_DEBUG_PRINT("[mqtt] connect failed: ");
     MQ_DEBUG_PRINTLN(_mqtt->connectErrorString(rc));
+    // Adafruit_MQTT leaves the TLS socket open when the broker refuses the
+    // session or a CONNACK or SUBACK never arrives, and the next connect()
+    // opens a new one without closing it. Close it here, or each refused retry
+    // leaks a socket until none are left and every connect fails.
+    _mqtt->disconnect();
     return false;
+  }
+  _mqtt_connected_at = millis();
+
+  if (didWakeFromSleep()) {
+    MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep!");
+  }
+
+  // A sleep is already queued and both replies are in, or were given up on,
+  // so this is the reconnect handleSleep() makes to send "sleeping", and it
+  // needs nothing else. An awake status here would show on the feed for a
+  // second before "sleeping", and asking for the feeds again would restart
+  // the wait, which on a link that keeps dropping could hold the board awake
+  // for good. The battery sample is still worth sending, if a hold kept it
+  // back earlier.
+  if (_is_sleep_pending && !_awaiting_bmp && !_awaiting_sleep) {
+    publishBattery();
+    return true;
   }
 
   // Publish to the status feed that the device is awake + why it is awake
@@ -787,13 +914,20 @@ bool Adafruit_Marquee::connectMqtt() {
   // Ask for IO to republish the last data point on the bitmap feed.
   // handleSleep() holds a queued sleep until this reply lands, otherwise the
   // small sleep payload beats the ~21KB bitmap to the device and the panel
-  // never updates.
+  // never updates. checkFeedReplies() gives up on it if IO never answers. A
+  // reconnect while a reply is still due keeps the original deadline, for the
+  // same reason, unless an IO hold paused the wait or the deadline is so
+  // close that the re-sent /gets could not be answered in time.
+  if ((!_awaiting_bmp && !_awaiting_sleep) || _get_held) {
+    _get_sent_at = millis();
+    _get_resent = false;
+    _get_held = false;
+  } else if (millis() - _get_sent_at >
+             MQ_GET_REPLY_TIMEOUT_MS - MQ_GET_REPLY_GRACE_MS) {
+    _get_sent_at = millis() - (MQ_GET_REPLY_TIMEOUT_MS - MQ_GET_REPLY_GRACE_MS);
+  }
   _awaiting_bmp = true;
   getFromFeed(_topic_bmp);
-
-  if (didWakeFromSleep()) {
-    MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep!");
-  }
 
   // Allow a cold boot with a sleep config from a feed to enter sleep after
   // drawing
@@ -810,6 +944,7 @@ bool Adafruit_Marquee::connectMqtt() {
  *          the reason.
  */
 bool Adafruit_Marquee::connect(unsigned long timeout) {
+  _connect_timeout = timeout;
   if (!initMqtt()) {
     MQ_DEBUG_PRINTLN("Failed to initialize the MQTT client and feeds");
     _status = ERR_MQTT_INIT;
@@ -822,8 +957,26 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
   }
 
   // connectMqtt() also asks the feeds to republish, so there is nothing left
-  // for this function to do once the session is up.
-  if (!connectMqtt()) {
+  // for this function to do once the session is up. A dropped connection or an
+  // unavailable broker gets a few quick retries first. IO's rate limit and ban
+  // (both 6) do not: every refused CONNECT counts toward the rate limit, and a
+  // ban lasts at least 30 s.
+  bool connected = connectMqtt();
+  for (uint8_t attempt = 1; !connected && attempt < MQ_MQTT_CONNECT_ATTEMPTS &&
+                            mqttRetrySoon(_mqtt_rc);
+       attempt++) {
+    MQ_DEBUG_PRINTF("[mqtt] retrying in %lu s (attempt %u of %u)\n",
+                    (unsigned long)(MQ_MQTT_RETRY_MS / 1000),
+                    (unsigned)(attempt + 1),
+                    (unsigned)MQ_MQTT_CONNECT_ATTEMPTS);
+    delay(MQ_MQTT_RETRY_MS);
+    if (!isNetConnected() && !initWifi(timeout)) {
+      _status = ERR_WIFI_CONNECT;
+      return false;
+    }
+    connected = connectMqtt();
+  }
+  if (!connected) {
     _status = ERR_IO_CONNECT;
     return false;
   }
@@ -831,9 +984,58 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
   // If we are waking from cold boot, push an empty buffer to clear the display
   // since there aren't any previous bitmaps to show or errors
   if (!didWakeFromSleep()) {
-    _display->display();
+    _display->display(true);
   }
 
+  _status = SUCCESS;
+  return true;
+}
+
+/*!
+ * @brief Whether an MQTT connect failure is worth retrying within seconds.
+ * @param rc The result of Adafruit_MQTT::connect().
+ * @returns True for no connection at all (-1: TCP, TLS or no CONNACK, as when
+ *          IO drops the socket of an IP it has banned), for a session accepted
+ *          but not subscribed (-2), and for "service unavailable" (3), which a
+ *          short wait can usually fix.
+ */
+bool Adafruit_Marquee::mqttRetrySoon(int8_t rc) {
+  return rc == -1 || rc == -2 || rc == 3;
+}
+
+/*!
+ * @brief Whether an MQTT connect failure is worth retrying after a long wait.
+ * @param rc The result of Adafruit_MQTT::connect().
+ * @returns False for answers retrying cannot change: an unsupported protocol
+ *          (1), a rejected client id (2), and malformed credentials (4). True
+ *          for everything else, which all lift with time. IO answers 6 both
+ *          for its connection rate limit (over 20 CONNECTs a minute per
+ *          username and IP; refused attempts count too, so retrying early
+ *          keeps it refusing) and for a temporary ban (30 s times the bans in
+ *          the last hour; CONNECTs during a ban do not extend it). IO answers
+ *          5 for a wrong key and also when it cannot check the key, so 5 is
+ *          not always permanent. IO never sends 7, though Adafruit_MQTT names
+ *          it a ban.
+ */
+bool Adafruit_Marquee::mqttRetryLater(int8_t rc) {
+  return rc != 1 && rc != 2 && rc != 4;
+}
+
+/*!
+ * @brief Reconnects after connect() failed, reusing the MQTT client and
+ *        subscriptions it already set up.
+ * @returns True once connected, with getStatus() SUCCESS; otherwise False,
+ *          with getStatus() ERR_WIFI_CONNECT or ERR_IO_CONNECT.
+ */
+bool Adafruit_Marquee::retryConnect() {
+  if (!isNetConnected() && !initWifi(_connect_timeout)) {
+    _status = ERR_WIFI_CONNECT;
+    return false;
+  }
+  if (!connectMqtt()) {
+    _status = ERR_IO_CONNECT;
+    return false;
+  }
   _status = SUCCESS;
   return true;
 }
@@ -855,6 +1057,88 @@ void Adafruit_Marquee::getFromFeed(const char *topic) {
 }
 
 /*!
+    @brief  Gives up on the bitmap and sleep feed /get replies once
+            MQ_GET_REPLY_TIMEOUT_MS has passed, so handleSleep() is not held
+            off for good. IO sends nothing back for a feed with no data yet,
+            such as a display that was provisioned but never pushed to, or for
+            a feed that does not exist. Unanswered /gets are re-sent once, half
+            way through. IO also drops every /get, with no reply, while the
+            account is over its data rate, and the throttle notice that
+            follows starts an IO hold, so the wait pauses for the hold and the
+            /gets go out again once it lifts.
+*/
+void Adafruit_Marquee::checkFeedReplies() {
+  if (!_awaiting_bmp && !_awaiting_sleep)
+    return;
+
+  // Giving up during a hold would leave a board that booted into a throttle
+  // with a blank panel and no sleep until a live publish. Ask again after
+  // the hold instead, from here if the session survived it, or from the
+  // reconnect that connectMqtt() makes if it did not.
+  if (ioHoldActive()) {
+    _get_held = true;
+    return;
+  }
+  if (_get_held) {
+    if (!_mqtt || !_mqtt->connected())
+      return;
+    _get_held = false;
+    _get_sent_at = millis();
+    _get_resent = false;
+    MQ_DEBUG_PRINTLN("[get] IO hold lifted, asking again");
+    if (_awaiting_bmp)
+      getFromFeed(_topic_bmp);
+    if (_awaiting_sleep)
+      getFromFeed(_topic_sleep);
+    return;
+  }
+  unsigned long waited = millis() - _get_sent_at;
+
+  // Every /get counts toward IO's data rate, so re-send only once
+  if (!_get_resent && waited >= MQ_GET_REPLY_TIMEOUT_MS / 2 && _mqtt &&
+      _mqtt->connected()) {
+    _get_resent = true;
+    MQ_DEBUG_PRINTLN("[get] no reply yet, asking again");
+    if (_awaiting_bmp)
+      getFromFeed(_topic_bmp);
+    if (_awaiting_sleep)
+      getFromFeed(_topic_sleep);
+    return;
+  }
+  if (waited < MQ_GET_REPLY_TIMEOUT_MS)
+    return;
+
+  if (_awaiting_bmp) {
+    MQ_DEBUG_PRINTLN("[get] no bitmap reply, keeping the current panel");
+    _awaiting_bmp = false;
+  }
+  if (_awaiting_sleep) {
+    MQ_DEBUG_PRINTLN("[get] no sleep reply");
+    _awaiting_sleep = false;
+    sleepOnLastCfg();
+  }
+}
+
+/*!
+    @brief  Queues a sleep on the last sleep config, for when the sleep feed
+            /get went unanswered or brought back nothing usable. A config from
+            this session, or from before a light sleep, is still in
+            _sleep_mode. After a deep sleep it is only in RTC memory. With
+            neither, nothing has ever told this board to sleep, so it stays
+            awake for a live publish, as it would with no sleep feed at all.
+*/
+void Adafruit_Marquee::sleepOnLastCfg() {
+  if (_is_sleep_pending)
+    return;
+  if (_sleep_mode != SLEEP_MODE_NONE || loadPrvSleepCfg()) {
+    MQ_DEBUG_PRINTLN("[sleep] using the last sleep config");
+    _is_sleep_pending = true;
+  } else {
+    MQ_DEBUG_PRINTLN("[sleep] no sleep config, staying awake");
+  }
+}
+
+/*!
     @brief  Publishes a payload to the device's status feed.
     @param  payload  The message to publish.
     @return True if the publish succeeded, False otherwise.
@@ -866,6 +1150,10 @@ bool Adafruit_Marquee::publishStatus(const char *payload) {
   }
   if (!_mqtt->connected()) {
     MQ_DEBUG_PRINTLN("[status] ERROR: Cannot publish, MQTT not connected");
+    return false;
+  }
+  if (ioHoldActive()) {
+    MQ_DEBUG_PRINTLN("[status] Not publishing, IO is throttling or banning");
     return false;
   }
 
@@ -933,8 +1221,10 @@ void Adafruit_Marquee::sampleBattery() {
             retried on the next MQTT connect.
 */
 void Adafruit_Marquee::publishBattery() {
+  // A sample held back by an IO throttle or ban stays pending for the next
+  // session
   if (!_batt_enabled || !_batt_pending || _topic_batt[0] == '\0' || !_mqtt ||
-      !_mqtt->connected()) {
+      !_mqtt->connected() || ioHoldActive()) {
     return;
   }
 
@@ -986,6 +1276,38 @@ void Adafruit_Marquee::storeBmpCRC(uint32_t crc) {
 }
 
 /*!
+    @brief  Restores the sleep config stored before the last sleep.
+    @return True if a config was stored and is now in _sleep_mode,
+            _sleep_alarm and _sleep_time, False otherwise.
+*/
+bool Adafruit_Marquee::loadPrvSleepCfg() {
+#ifdef ARDUINO_ARCH_ESP32
+  if (!didWakeFromSleep() ||
+      (prvSleepMode != SLEEP_MODE_DEEP && prvSleepMode != SLEEP_MODE_LIGHT))
+    return false;
+  _sleep_mode = (mq_sleep_mode_t)prvSleepMode;
+  _sleep_alarm = (mq_sleep_alarm_t)prvSleepAlarm;
+  // Stored clamped, but RTC memory could hold a value from older firmware
+  _sleep_time = max(prvSleepTime, (uint64_t)MQ_SLEEP_MIN_S);
+  return true;
+#else
+  return false;
+#endif // ARDUINO_ARCH_ESP32
+}
+
+/*!
+    @brief  Records the current sleep config, so a wake from deep sleep can
+            fall back to it if the sleep feed does not answer.
+*/
+void Adafruit_Marquee::storeSleepCfg() {
+#ifdef ARDUINO_ARCH_ESP32
+  prvSleepMode = (uint8_t)_sleep_mode;
+  prvSleepAlarm = (uint8_t)_sleep_alarm;
+  prvSleepTime = _sleep_time;
+#endif // ARDUINO_ARCH_ESP32
+}
+
+/*!
     @brief  Clears the panel and draws an error message on it, scaled to the
             panel size.
     @param  title    The error title, drawn large.
@@ -1022,7 +1344,7 @@ void Adafruit_Marquee::displayErrorMsg(const char *title, const char *details,
     _display->print(label);
     _display->print(value ? value : "(missing)");
   }
-  _display->display();
+  _display->display(true);
 }
 
 /*!
@@ -1076,14 +1398,24 @@ void Adafruit_Marquee::handleConnection() {
 
   // Is the MQTT session still connected?
   if (!_mqtt->connected()) {
-    if (millis() - _last_mqtt_attempt < _mqtt_retry_ms) {
+    if (millis() - _last_mqtt_attempt < _mqtt_retry_ms || ioHoldActive()) {
       return;
     }
     MQ_DEBUG_PRINTLN("[mqtt] disconnected, reconnecting");
-    if (!connectMqtt()) {
-      return;
-    }
+    // Each reconnect publishes the awake status and the /get requests, and
+    // all of them count toward IO's data rate. A board that keeps losing its
+    // session would, on a fixed 10 s wait, keep publishing over that rate
+    // (more than 20 over it within 5 s is a ban) and hit IO's limit of 20
+    // connects a minute. Double the wait on every reconnect; a session that
+    // stays up resets it, below.
+    _mqtt_retry_ms =
+        min(_mqtt_retry_ms * 2, (unsigned long)MQ_MQTT_RETRY_MAX_MS);
+    connectMqtt();
     return;
+  }
+  if (_mqtt_retry_ms != MQ_MQTT_RETRY_MS &&
+      millis() - _mqtt_connected_at >= MQ_MQTT_STABLE_MS) {
+    _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
   }
 
   // Attempt to process incoming packets
@@ -1104,6 +1436,10 @@ void Adafruit_Marquee::run() {
   // Keeps the WiFi and MQTT session up, dispatches any incoming feed messages
   handleConnection();
 
+  // Stop waiting on /get replies that IO never sent. This goes before the
+  // draw: a panel refresh blocks for tens of seconds, and a reply that lands
+  // meanwhile is only read on the next handleConnection().
+  checkFeedReplies();
   // Draw any bitmap queued by the bitmap feed callback
   drawBitmap();
   // Sleep, if the sleep feed asked for it. On deep sleep this does not return.
@@ -1129,6 +1465,70 @@ void Adafruit_Marquee::cbBitmapMsg(char *data, size_t len) {
 }
 
 /*!
+    @brief  Callback for {user}/throttle and {user}/errors messages. Forwards
+            the notice to the instance registered by initMqtt().
+    @param  data  The notice text, nul-terminated by Adafruit_MQTT.
+    @param  len   Notice length, in bytes.
+*/
+void Adafruit_Marquee::cbIONoticeMsg(char *data, size_t len) {
+  if (!_instance || !data || len == 0)
+    return;
+  MQ_DEBUG_PRINT("[io] notice <- ");
+  MQ_DEBUG_PRINTLN(data);
+  _instance->holdForIONotice(data);
+}
+
+/*!
+    @brief  Holds off reconnects and publishes after an IO throttle or ban
+            notice, for as long as the notice says, such as "21 seconds until
+            throttle released" or "banned for 30 seconds". Other errors, such
+            as a rejected topic, do not hold.
+    @param  msg  The notice text.
+*/
+void Adafruit_Marquee::holdForIONotice(const char *msg) {
+  if (!strstr(msg, "throttle") && !strstr(msg, "rate limit") &&
+      !strstr(msg, "ban") && !strstr(msg, "blocked"))
+    return;
+
+  unsigned long hold_ms = MQ_IO_HOLD_DEFAULT_MS;
+  const char *unit = strstr(msg, " second");
+  if (unit) {
+    const char *digits = unit;
+    while (digits > msg && isdigit((unsigned char)digits[-1]))
+      digits--;
+    if (digits < unit) {
+      unsigned long secs = strtoul(digits, nullptr, 10);
+      if (secs > MQ_IO_HOLD_MAX_S)
+        secs = MQ_IO_HOLD_MAX_S;
+      // A second of margin, so the hold outlasts IO's own timer
+      hold_ms = (secs + 1) * 1000UL;
+    }
+  }
+
+  // Never shorten a hold that is already running
+  if (ioHoldActive() && _io_hold_ms - (millis() - _io_hold_start) > hold_ms)
+    return;
+  _io_hold_start = millis();
+  _io_hold_ms = hold_ms;
+  MQ_DEBUG_PRINTF("[io] holding reconnects and publishes for %lu s\n",
+                  hold_ms / 1000);
+}
+
+/*!
+    @brief  Whether an IO throttle or ban notice is still holding off
+            reconnects and publishes.
+    @return True while the hold runs, False otherwise.
+*/
+bool Adafruit_Marquee::ioHoldActive() {
+  if (_io_hold_ms == 0)
+    return false;
+  if (millis() - _io_hold_start < _io_hold_ms)
+    return true;
+  _io_hold_ms = 0;
+  return false;
+}
+
+/*!
     @brief  Callback for sleep feed messages, parses and stores the sleep feed's
    JSON data into the class instance.
     @param  data  The message payload.
@@ -1137,9 +1537,15 @@ void Adafruit_Marquee::cbBitmapMsg(char *data, size_t len) {
 void Adafruit_Marquee::cbSleepMsg(char *data, size_t len) {
   if (!_instance)
     return;
+  // A reply that is empty or will not parse is as good as none: a wake that
+  // was waiting on it falls back to the last config, as a timeout would.
+  bool awaited = _instance->_awaiting_sleep;
   _instance->_awaiting_sleep = false;
-  if (!data || len == 0)
+  if (!data || len == 0) {
+    if (awaited)
+      _instance->sleepOnLastCfg();
     return;
+  }
   MQ_DEBUG_PRINT("Sleep feed received <- ");
   MQ_DEBUG_PRINTLN(data);
 
@@ -1149,6 +1555,8 @@ void Adafruit_Marquee::cbSleepMsg(char *data, size_t len) {
   if (error) {
     MQ_DEBUG_PRINT("Sleep feed JSON parse failed");
     MQ_DEBUG_PRINTLN(error.c_str());
+    if (awaited)
+      _instance->sleepOnLastCfg();
     return;
   }
 
@@ -1162,10 +1570,31 @@ void Adafruit_Marquee::cbSleepMsg(char *data, size_t len) {
     _instance->_sleep_mode = SLEEP_MODE_DEEP;
   } else if (doc["sleep_mode"] == "light") {
     _instance->_sleep_mode = SLEEP_MODE_LIGHT;
-  } else {
+  } else if (doc["sleep_mode"] == "none") {
+    // An explicit "none" keeps a mains-powered display on for live pushes,
+    // and cancels a sleep queued by an earlier reply. Stored too, so a wake
+    // whose sleep feed goes quiet does not fall back to an older config.
+    MQ_DEBUG_PRINTLN("[sleep] sleep_mode none, staying awake");
     _instance->_sleep_mode = SLEEP_MODE_NONE;
+    _instance->storeSleepCfg();
+    _instance->_is_sleep_pending = false;
+    return;
+  } else {
+    // The editor only writes "light", "deep" or "none". Anything else still
+    // asks the board to sleep, and on battery deep sleep is safer than
+    // staying awake.
+    MQ_DEBUG_PRINTLN("[sleep] unknown sleep_mode, using deep sleep");
+    _instance->_sleep_mode = SLEEP_MODE_DEEP;
   }
-  _instance->_sleep_time = doc["sleep_time"] | 60;
+  // Read signed, so a negative value clamps up rather than wrapping
+  int64_t sleep_time = doc["sleep_time"] | (int64_t)60;
+  if (sleep_time < MQ_SLEEP_MIN_S) {
+    MQ_DEBUG_PRINTF("[sleep] sleep_time %lld is too short, using %d s\n",
+                    (long long)sleep_time, MQ_SLEEP_MIN_S);
+    sleep_time = MQ_SLEEP_MIN_S;
+  }
+  _instance->_sleep_time = (uint64_t)sleep_time;
+  _instance->storeSleepCfg();
   _instance->_is_sleep_pending = true;
   MQ_DEBUG_PRINTLN("[sleep] Sleep feed stored, sleep pending");
 }
@@ -1513,16 +1942,24 @@ void Adafruit_Marquee::handleSleep() {
     return;
   }
 
-  // Do not enter sleep until the bitmap message has been received and drawn
+  // Do not enter sleep until the bitmap message has been received and drawn,
+  // or checkFeedReplies() gives up on it. Logged once per hold, since the
+  // hold can last until MQ_GET_REPLY_TIMEOUT_MS.
   if (_awaiting_bmp || _awaiting_sleep) {
-    MQ_DEBUG_PRINTLN(
-        "[sleep] Holding off sleep until bitmap has been received");
+    if (!_sleep_hold_logged) {
+      MQ_DEBUG_PRINTLN(
+          "[sleep] Holding off sleep until bitmap has been received");
+      _sleep_hold_logged = true;
+    }
     return;
   }
+  _sleep_hold_logged = false;
 
   // If MQTT is not connected, try to reconnect up to 3 times so the "sleeping"
-  // status can reach IO
-  if (_mqtt && !_mqtt->connected()) {
+  // status can reach IO. Not while IO is throttling or banning the board: a
+  // banned board cannot connect, and a throttled one's publishes would be
+  // dropped and count toward a ban.
+  if (_mqtt && !_mqtt->connected() && !ioHoldActive()) {
     MQ_DEBUG_PRINTLN("[sleep] MQTT disconnected, attempting to reconnect...");
     for (uint8_t attempts = 0; attempts < 3 && !_mqtt->connected();
          attempts++) {
@@ -1600,11 +2037,21 @@ void Adafruit_Marquee::handleSleep() {
     delay(500);
 
     if (rc != ESP_OK) {
-      MQ_DEBUG_PRINTF("[sleep] ERROR: could not enter light sleep: %d\n",
+      // The session is already down and "sleeping" already sent. Staying
+      // awake would reconnect, ask for the feeds again, and on the sleep
+      // reply try the same light sleep again, so a failure that persists
+      // would loop through connect, publish and fail. The timer wakeup is
+      // still armed, so deep sleep instead and keep the schedule. The
+      // sleep_time clamp rules out IDF's too-short-duration error, so what
+      // remains is a rejected sleep, such as a wakeup source already pending.
+      MQ_DEBUG_PRINTF("[sleep] ERROR: could not enter light sleep: %d, "
+                      "entering deep sleep instead\n",
                       (int)rc);
-      esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-      _is_sleep_pending = false;
-      return;
+      MQ_DEBUG_FLUSH();
+      TinyUSBDevice.detach();
+      delay(10);
+      esp_deep_sleep_start();
+      // Not reached: the chip resets on wake.
     }
 
     MQ_DEBUG_PRINTF("[sleep] wake reason: %s\n", wakeupReason());
