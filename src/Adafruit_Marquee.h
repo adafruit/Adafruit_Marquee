@@ -80,6 +80,17 @@
   60000 ///< First wait before displayStatus() retries a failed connect, in ms
 #define MQ_ERROR_RETRY_MAX_MS                                                  \
   900000 ///< Longest wait between displayStatus() connect retries, in ms
+#define MQ_MQTT_RETRY_MAX_MS                                                   \
+  300000 ///< Longest wait between handleConnection() reconnects, in ms
+#define MQ_MQTT_STABLE_MS                                                      \
+  60000 ///< A session up this long resets the reconnect wait, in ms
+#define MQ_IO_HOLD_DEFAULT_MS                                                  \
+  60000 ///< How long an IO throttle or ban notice with no duration holds off
+        ///< reconnects and publishes, in ms
+#define MQ_IO_HOLD_MAX_S                                                       \
+  3600 ///< Longest hold taken from an IO notice, in seconds (IO's ban cap)
+#define MQ_IO_NOTICE_SUB_LEN                                                   \
+  256 ///< Holds a {user}/throttle or {user}/errors message, in bytes
 
 #define MQ_SSID_MAX_LEN 32     ///< Maximum length of a WiFi SSID, in chars
 #define MQ_WPA_PASS_MIN_LEN 8  ///< Minimum length of a WPA password, in chars
@@ -179,6 +190,8 @@ protected:
   bool retryConnect();
   static bool mqttRetrySoon(int8_t rc);
   static bool mqttRetryLater(int8_t rc);
+  void holdForIONotice(const char *msg);
+  bool ioHoldActive();
 
   // Board-specific power rails
 #if defined(MARQUEE_BOARD_XTEINK_X4_PRO)
@@ -191,6 +204,7 @@ protected:
   bool parseThinkInkMode(const char *mode);
   bool decodeb64Bmp(const char *b64, size_t b64_len);
   void drawBitmap();
+  void drawStatus();
   void displayErrorMsg(const char *title, const char *details,
                        const char *label = nullptr,
                        const char *value = nullptr);
@@ -231,12 +245,24 @@ protected:
                                     ///< attempted, in millis()
   unsigned long _mqtt_retry_ms;     ///< How long to wait before retrying MQTT
                                     ///< connection, in milliseconds
-  int8_t _mqtt_rc; ///< Result of the last MQTT connect, 0 on success; see
-                   ///< Adafruit_MQTT::connectErrorString()
+  unsigned long _mqtt_connected_at; ///< When the current MQTT session came up,
+                                    ///< in millis()
+  int8_t _mqtt_rc; ///< Result of the last MQTT connect: 0 on success, -1 for
+                   ///< no connection (also the value before any attempt), -2
+                   ///< for a failed subscribe, else the broker's CONNACK
+                   ///< refusal; see Adafruit_MQTT::connectErrorString()
+  unsigned long _io_hold_start;   ///< When the last IO throttle or ban notice
+                                  ///< arrived, in millis()
+  unsigned long _io_hold_ms;      ///< How long that notice holds off reconnects
+                                  ///< and publishes, in ms; 0 for no hold
   unsigned long _connect_timeout; ///< The WiFi timeout connect() was given, in
                                   ///< milliseconds, reused by retryConnect()
-  Adafruit_MQTT_Subscribe *_sub_bmp;   ///< Subscription for the bitmap topic
-  Adafruit_MQTT_Subscribe *_sub_sleep; ///< Subscription for the sleep topic
+  Adafruit_MQTT_Subscribe *_sub_bmp;      ///< Subscription for the bitmap topic
+  Adafruit_MQTT_Subscribe *_sub_sleep;    ///< Subscription for the sleep topic
+  Adafruit_MQTT_Subscribe *_sub_throttle; ///< Subscription for IO's data rate
+                                          ///< throttle notices
+  Adafruit_MQTT_Subscribe *_sub_errors;   ///< Subscription for IO's error and
+                                          ///< ban notices
   bool _awaiting_bmp;   ///< True while this session's bitmap feed /get is still
                         ///< unanswered
   bool _awaiting_sleep; ///< True while this session's sleep feed /get is still
@@ -249,8 +275,11 @@ protected:
                                                  ///< feed
   char _topic_status[MAX_IO_FEED_NAME_LEN + 96]; ///< {user}/f/{feed}, no /csv:
                                                  ///< the payload is JSON
+  char _topic_throttle[MAX_IO_FEED_NAME_LEN];    ///< {user}/throttle
+  char _topic_errors[MAX_IO_FEED_NAME_LEN];      ///< {user}/errors
   static void cbBitmapMsg(char *data, size_t len);
   static void cbSleepMsg(char *data, size_t len);
+  static void cbIONoticeMsg(char *data, size_t len);
   void getFromFeed(const char *topic);
   bool publishStatus(const char *payload);
 

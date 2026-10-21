@@ -389,10 +389,15 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _last_wifi_attempt = 0;
   _last_mqtt_attempt = 0;
   _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
-  _mqtt_rc = 0;
+  _mqtt_connected_at = 0;
+  _mqtt_rc = -1; // No attempt yet; 0 would mean the broker accepted us
+  _io_hold_start = 0;
+  _io_hold_ms = 0;
   _connect_timeout = 30000;
   _sub_bmp = nullptr;
   _sub_sleep = nullptr;
+  _sub_throttle = nullptr;
+  _sub_errors = nullptr;
   _awaiting_bmp = false;
   _awaiting_sleep = false;
   _pending_bmp = nullptr;
@@ -450,6 +455,10 @@ Adafruit_Marquee::~Adafruit_Marquee() {
   _sub_bmp = nullptr;
   delete _sub_sleep;
   _sub_sleep = nullptr;
+  delete _sub_throttle;
+  _sub_throttle = nullptr;
+  delete _sub_errors;
+  _sub_errors = nullptr;
   delete _mqtt;
   _mqtt = nullptr;
   if (_instance == this) {
@@ -558,13 +567,9 @@ mq_status_t Adafruit_Marquee::parseCreds() {
 mq_status_t Adafruit_Marquee::getStatus() { return _status; }
 
 /*!
- * @brief Displays the last _status error on the screen, keeping USB MSC open.
- *        Only call when getStatus() is not SUCCESS. For ERR_WIFI_CONNECT and
- *        for an ERR_IO_CONNECT that was not a credentials rejection, retries
- *        the connection with a growing wait and returns once connected, with
- *        getStatus() SUCCESS. For every other error, halts.
+ * @brief Draws the error for the current _status on the panel.
  */
-void Adafruit_Marquee::displayStatus() {
+void Adafruit_Marquee::drawStatus() {
   switch (_status) {
   case ERR_MISSING_WIFI_CREDS:
     displayErrorMsg("WiFi Error",
@@ -601,6 +606,18 @@ void Adafruit_Marquee::displayStatus() {
   default:
     break;
   }
+}
+
+/*!
+ * @brief Displays the last _status error on the screen, keeping USB MSC open.
+ *        Only call when getStatus() is not SUCCESS. For ERR_WIFI_CONNECT and
+ *        for an ERR_IO_CONNECT that was not a fatal rejection, retries the
+ *        connection with a growing wait and returns once connected, with
+ *        getStatus() SUCCESS. For every other error, halts.
+ */
+void Adafruit_Marquee::displayStatus() {
+  drawStatus();
+  mq_status_t shown = _status;
 
   // A failed connect is often temporary: a router rebooting, or IO refusing a
   // board that reconnected too often. Halting on one would leave the board on
@@ -630,8 +647,15 @@ void Adafruit_Marquee::displayStatus() {
         _display->display();
         return;
       }
-      // Bad credentials only change when someone edits cfg-marquee.json, and
-      // a reset picks that up, so stop retrying and halt below.
+      // A Wi-Fi error can turn into an IO error once the router is back, or
+      // the other way round. Redraw only then: e-ink refreshes are slow and
+      // flash the panel.
+      if (_status != shown) {
+        drawStatus();
+        shown = _status;
+      }
+      // Malformed credentials only change when someone edits cfg-marquee.json,
+      // and a reset picks that up, so stop retrying and halt below.
       if (_status == ERR_IO_CONNECT && !mqttRetryLater(_mqtt_rc))
         break;
       wait = min(wait * 2, (unsigned long)MQ_ERROR_RETRY_MAX_MS);
@@ -747,8 +771,28 @@ bool Adafruit_Marquee::initMqtt() {
     }
   }
 
+  // IO announces its data rate throttle and temporary bans on these topics.
+  // IO drops the session on a rejected publish, and more than 10 rejections a
+  // minute start a ban or lengthen it, so a notice holds off reconnects (each
+  // one publishes) and publishes until it lifts.
+  snprintf(_topic_throttle, sizeof(_topic_throttle), "%s/throttle",
+           _aio_username);
+  snprintf(_topic_errors, sizeof(_topic_errors), "%s/errors", _aio_username);
+  _sub_throttle = new Adafruit_MQTT_Subscribe(_mqtt, _topic_throttle, 0,
+                                              MQ_IO_NOTICE_SUB_LEN);
+  _sub_errors = new Adafruit_MQTT_Subscribe(_mqtt, _topic_errors, 0,
+                                            MQ_IO_NOTICE_SUB_LEN);
+  if (!_sub_throttle || !_sub_throttle->lastread || !_sub_errors ||
+      !_sub_errors->lastread) {
+    MQ_DEBUG_PRINTLN("[io] ERROR: could not create the IO notice feeds");
+    return false;
+  }
+  _sub_throttle->setCallback(cbIONoticeMsg);
+  _sub_errors->setCallback(cbIONoticeMsg);
+
   // Attempt to register subscriptions
-  if (!_mqtt->subscribe(_sub_bmp) || !_mqtt->subscribe(_sub_sleep)) {
+  if (!_mqtt->subscribe(_sub_bmp) || !_mqtt->subscribe(_sub_sleep) ||
+      !_mqtt->subscribe(_sub_throttle) || !_mqtt->subscribe(_sub_errors)) {
     MQ_DEBUG_PRINTLN("Failed to register MQTT subscriptions");
     return false;
   }
@@ -757,6 +801,10 @@ bool Adafruit_Marquee::initMqtt() {
   MQ_DEBUG_PRINTLN(_topic_bmp);
   MQ_DEBUG_PRINT("Subscribed to sleep feed: ");
   MQ_DEBUG_PRINTLN(_topic_sleep);
+  MQ_DEBUG_PRINT("Subscribed to IO notices: ");
+  MQ_DEBUG_PRINT(_topic_throttle);
+  MQ_DEBUG_PRINT(", ");
+  MQ_DEBUG_PRINTLN(_topic_errors);
   MQ_DEBUG_PRINT("Publishing status to: ");
   MQ_DEBUG_PRINTLN(_topic_status);
   if (_batt_enabled) {
@@ -804,12 +852,17 @@ bool Adafruit_Marquee::connectMqtt() {
   _last_mqtt_attempt = millis();
   int8_t rc = _mqtt->connect();
   _mqtt_rc = rc;
-  _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
   if (rc != 0) {
     MQ_DEBUG_PRINT("[mqtt] connect failed: ");
     MQ_DEBUG_PRINTLN(_mqtt->connectErrorString(rc));
+    // Adafruit_MQTT leaves the TLS socket open when the broker refuses the
+    // session or a CONNACK or SUBACK never arrives, and the next connect()
+    // opens a new one without closing it. Close it here, or each refused retry
+    // leaks a socket until none are left and every connect fails.
+    _mqtt->disconnect();
     return false;
   }
+  _mqtt_connected_at = millis();
 
   // Publish to the status feed that the device is awake + why it is awake
   JsonDocument doc;
@@ -901,21 +954,26 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
 /*!
  * @brief Whether an MQTT connect failure is worth retrying within seconds.
  * @param rc The result of Adafruit_MQTT::connect().
- * @returns True for no connection at all (-1: TCP, TLS or no CONNACK) and for
- *          "service unavailable" (3), which a short wait can fix.
+ * @returns True for no connection at all (-1: TCP, TLS or no CONNACK), for a
+ *          session accepted but not subscribed (-2), and for "service
+ *          unavailable" (3), which a short wait can fix.
  */
-bool Adafruit_Marquee::mqttRetrySoon(int8_t rc) { return rc == -1 || rc == 3; }
+bool Adafruit_Marquee::mqttRetrySoon(int8_t rc) {
+  return rc == -1 || rc == -2 || rc == 3;
+}
 
 /*!
  * @brief Whether an MQTT connect failure is worth retrying after a long wait.
  * @param rc The result of Adafruit_MQTT::connect().
  * @returns False for answers retrying cannot change: an unsupported protocol
- *          (1), a rejected client id (2), and bad credentials (4, 5). True for
- *          everything else, including IO's rate limit (6) and temporary ban
- *          (7), which lift with time but get worse with quick retries.
+ *          (1), a rejected client id (2), and malformed credentials (4). True
+ *          for everything else. That includes "not authorized" (5), which IO
+ *          also sends to refuse connects over its limit of 20 a minute until
+ *          the minute is up, and 6 and 7, which Adafruit_MQTT names as a
+ *          reconnect rate limit and a ban. All of these lift with time.
  */
 bool Adafruit_Marquee::mqttRetryLater(int8_t rc) {
-  return rc != 1 && rc != 2 && rc != 4 && rc != 5;
+  return rc != 1 && rc != 2 && rc != 4;
 }
 
 /*!
@@ -965,6 +1023,10 @@ bool Adafruit_Marquee::publishStatus(const char *payload) {
   }
   if (!_mqtt->connected()) {
     MQ_DEBUG_PRINTLN("[status] ERROR: Cannot publish, MQTT not connected");
+    return false;
+  }
+  if (ioHoldActive()) {
+    MQ_DEBUG_PRINTLN("[status] Not publishing, IO is throttling or banning");
     return false;
   }
 
@@ -1032,8 +1094,10 @@ void Adafruit_Marquee::sampleBattery() {
             retried on the next MQTT connect.
 */
 void Adafruit_Marquee::publishBattery() {
+  // A sample held back by an IO throttle or ban stays pending for the next
+  // session
   if (!_batt_enabled || !_batt_pending || _topic_batt[0] == '\0' || !_mqtt ||
-      !_mqtt->connected()) {
+      !_mqtt->connected() || ioHoldActive()) {
     return;
   }
 
@@ -1175,14 +1239,23 @@ void Adafruit_Marquee::handleConnection() {
 
   // Is the MQTT session still connected?
   if (!_mqtt->connected()) {
-    if (millis() - _last_mqtt_attempt < _mqtt_retry_ms) {
+    if (millis() - _last_mqtt_attempt < _mqtt_retry_ms || ioHoldActive()) {
       return;
     }
     MQ_DEBUG_PRINTLN("[mqtt] disconnected, reconnecting");
-    if (!connectMqtt()) {
-      return;
-    }
+    // Each reconnect publishes the awake status and the /get requests, and
+    // all of them count toward IO's data rate. While the account is throttled
+    // IO drops the session on the first of them, so a fixed wait would keep
+    // reconnecting into rejections until IO bans the board. Double the wait
+    // on every reconnect; a session that stays up resets it, below.
+    _mqtt_retry_ms =
+        min(_mqtt_retry_ms * 2, (unsigned long)MQ_MQTT_RETRY_MAX_MS);
+    connectMqtt();
     return;
+  }
+  if (_mqtt_retry_ms != MQ_MQTT_RETRY_MS &&
+      millis() - _mqtt_connected_at >= MQ_MQTT_STABLE_MS) {
+    _mqtt_retry_ms = MQ_MQTT_RETRY_MS;
   }
 
   // Attempt to process incoming packets
@@ -1225,6 +1298,70 @@ void Adafruit_Marquee::cbBitmapMsg(char *data, size_t len) {
 
   // Process the bitmap message
   _instance->decodeb64Bmp(data, len);
+}
+
+/*!
+    @brief  Callback for {user}/throttle and {user}/errors messages. Forwards
+            the notice to the instance registered by initMqtt().
+    @param  data  The notice text, nul-terminated by Adafruit_MQTT.
+    @param  len   Notice length, in bytes.
+*/
+void Adafruit_Marquee::cbIONoticeMsg(char *data, size_t len) {
+  if (!_instance || !data || len == 0)
+    return;
+  MQ_DEBUG_PRINT("[io] notice <- ");
+  MQ_DEBUG_PRINTLN(data);
+  _instance->holdForIONotice(data);
+}
+
+/*!
+    @brief  Holds off reconnects and publishes after an IO throttle or ban
+            notice, for as long as the notice says, such as "21 seconds until
+            throttle released" or "banned for 30 seconds". Other errors, such
+            as a rejected topic, do not hold.
+    @param  msg  The notice text.
+*/
+void Adafruit_Marquee::holdForIONotice(const char *msg) {
+  if (!strstr(msg, "throttle") && !strstr(msg, "rate limit") &&
+      !strstr(msg, "ban") && !strstr(msg, "blocked"))
+    return;
+
+  unsigned long hold_ms = MQ_IO_HOLD_DEFAULT_MS;
+  const char *unit = strstr(msg, " second");
+  if (unit) {
+    const char *digits = unit;
+    while (digits > msg && isdigit((unsigned char)digits[-1]))
+      digits--;
+    if (digits < unit) {
+      unsigned long secs = strtoul(digits, nullptr, 10);
+      if (secs > MQ_IO_HOLD_MAX_S)
+        secs = MQ_IO_HOLD_MAX_S;
+      // A second of margin, so the hold outlasts IO's own timer
+      hold_ms = (secs + 1) * 1000UL;
+    }
+  }
+
+  // Never shorten a hold that is already running
+  if (ioHoldActive() && _io_hold_ms - (millis() - _io_hold_start) > hold_ms)
+    return;
+  _io_hold_start = millis();
+  _io_hold_ms = hold_ms;
+  MQ_DEBUG_PRINTF("[io] holding reconnects and publishes for %lu s\n",
+                  hold_ms / 1000);
+}
+
+/*!
+    @brief  Whether an IO throttle or ban notice is still holding off
+            reconnects and publishes.
+    @return True while the hold runs, False otherwise.
+*/
+bool Adafruit_Marquee::ioHoldActive() {
+  if (_io_hold_ms == 0)
+    return false;
+  if (millis() - _io_hold_start < _io_hold_ms)
+    return true;
+  _io_hold_ms = 0;
+  return false;
 }
 
 /*!
@@ -1620,8 +1757,9 @@ void Adafruit_Marquee::handleSleep() {
   }
 
   // If MQTT is not connected, try to reconnect up to 3 times so the "sleeping"
-  // status can reach IO
-  if (_mqtt && !_mqtt->connected()) {
+  // status can reach IO. Not while IO is throttling or banning the board: the
+  // reconnect's own publishes would be rejected and lengthen the ban.
+  if (_mqtt && !_mqtt->connected() && !ioHoldActive()) {
     MQ_DEBUG_PRINTLN("[sleep] MQTT disconnected, attempting to reconnect...");
     for (uint8_t attempts = 0; attempts < 3 && !_mqtt->connected();
          attempts++) {
