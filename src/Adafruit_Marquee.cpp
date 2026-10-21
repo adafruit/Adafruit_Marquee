@@ -408,6 +408,7 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _awaiting_sleep = false;
   _get_sent_at = 0;
   _get_resent = false;
+  _get_held = false;
   _pending_bmp = nullptr;
   _pending_bmp_len = 0;
   _pending_crc = 0;
@@ -874,6 +875,22 @@ bool Adafruit_Marquee::connectMqtt() {
   }
   _mqtt_connected_at = millis();
 
+  if (didWakeFromSleep()) {
+    MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep!");
+  }
+
+  // A sleep is already queued and both replies are in, or were given up on,
+  // so this is the reconnect handleSleep() makes to send "sleeping", and it
+  // needs nothing else. An awake status here would show on the feed for a
+  // second before "sleeping", and asking for the feeds again would restart
+  // the wait, which on a link that keeps dropping could hold the board awake
+  // for good. The battery sample is still worth sending, if a hold kept it
+  // back earlier.
+  if (_is_sleep_pending && !_awaiting_bmp && !_awaiting_sleep) {
+    publishBattery();
+    return true;
+  }
+
   // Publish to the status feed that the device is awake + why it is awake
   JsonDocument doc;
   doc["state"] = "awake";
@@ -889,28 +906,20 @@ bool Adafruit_Marquee::connectMqtt() {
   // Report the battery sample taken at boot (or on light-sleep wake)
   publishBattery();
 
-  if (didWakeFromSleep()) {
-    MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep!");
-  }
-
-  // A sleep is already queued and both replies are in, or were given up on,
-  // so this wake has what it needs. Asking again would restart the wait,
-  // such as when handleSleep() reconnects to send "sleeping" after
-  // checkFeedReplies() gave up, and a link that keeps dropping could then
-  // hold the board awake for good.
-  if (_is_sleep_pending && !_awaiting_bmp && !_awaiting_sleep) {
-    return true;
-  }
-
   // Ask for IO to republish the last data point on the bitmap feed.
   // handleSleep() holds a queued sleep until this reply lands, otherwise the
   // small sleep payload beats the ~21KB bitmap to the device and the panel
   // never updates. checkFeedReplies() gives up on it if IO never answers. A
   // reconnect while a reply is still due keeps the original deadline, for the
-  // same reason.
-  if (!_awaiting_bmp && !_awaiting_sleep) {
+  // same reason, unless an IO hold paused the wait or the deadline is so
+  // close that the re-sent /gets could not be answered in time.
+  if ((!_awaiting_bmp && !_awaiting_sleep) || _get_held) {
     _get_sent_at = millis();
     _get_resent = false;
+    _get_held = false;
+  } else if (millis() - _get_sent_at >
+             MQ_GET_REPLY_TIMEOUT_MS - MQ_GET_REPLY_GRACE_MS) {
+    _get_sent_at = millis() - (MQ_GET_REPLY_TIMEOUT_MS - MQ_GET_REPLY_GRACE_MS);
   }
   _awaiting_bmp = true;
   getFromFeed(_topic_bmp);
@@ -1046,19 +1055,43 @@ void Adafruit_Marquee::getFromFeed(const char *topic) {
     @brief  Gives up on the bitmap and sleep feed /get replies once
             MQ_GET_REPLY_TIMEOUT_MS has passed, so handleSleep() is not held
             off for good. IO sends nothing back for a feed with no data yet,
-            such as a display that was provisioned but never pushed to, or
-            when the lookup fails. Unanswered /gets are re-sent once, half way
-            through.
+            such as a display that was provisioned but never pushed to, or for
+            a feed that does not exist. Unanswered /gets are re-sent once, half
+            way through. IO also drops every /get, with no reply, while the
+            account is over its data rate, and the throttle notice that
+            follows starts an IO hold, so the wait pauses for the hold and the
+            /gets go out again once it lifts.
 */
 void Adafruit_Marquee::checkFeedReplies() {
   if (!_awaiting_bmp && !_awaiting_sleep)
     return;
+
+  // Giving up during a hold would leave a board that booted into a throttle
+  // with a blank panel and no sleep until a live publish. Ask again after
+  // the hold instead, from here if the session survived it, or from the
+  // reconnect that connectMqtt() makes if it did not.
+  if (ioHoldActive()) {
+    _get_held = true;
+    return;
+  }
+  if (_get_held) {
+    if (!_mqtt || !_mqtt->connected())
+      return;
+    _get_held = false;
+    _get_sent_at = millis();
+    _get_resent = false;
+    MQ_DEBUG_PRINTLN("[get] IO hold lifted, asking again");
+    if (_awaiting_bmp)
+      getFromFeed(_topic_bmp);
+    if (_awaiting_sleep)
+      getFromFeed(_topic_sleep);
+    return;
+  }
   unsigned long waited = millis() - _get_sent_at;
 
-  // Every /get counts toward IO's data rate, so re-send only once, and not
-  // while IO is throttling or banning the board.
+  // Every /get counts toward IO's data rate, so re-send only once
   if (!_get_resent && waited >= MQ_GET_REPLY_TIMEOUT_MS / 2 && _mqtt &&
-      _mqtt->connected() && !ioHoldActive()) {
+      _mqtt->connected()) {
     _get_resent = true;
     MQ_DEBUG_PRINTLN("[get] no reply yet, asking again");
     if (_awaiting_bmp)
@@ -1075,20 +1108,28 @@ void Adafruit_Marquee::checkFeedReplies() {
     _awaiting_bmp = false;
   }
   if (_awaiting_sleep) {
+    MQ_DEBUG_PRINTLN("[get] no sleep reply");
     _awaiting_sleep = false;
-    if (_is_sleep_pending)
-      return;
-    // A config from this session, or from before a light sleep, is still in
-    // _sleep_mode. After a deep sleep it is only in RTC memory.
-    if (_sleep_mode != SLEEP_MODE_NONE || loadPrvSleepCfg()) {
-      MQ_DEBUG_PRINTLN("[get] no sleep reply, using the last sleep config");
-      _is_sleep_pending = true;
-    } else {
-      // Nothing has ever told this board to sleep, so it stays awake for a
-      // live publish, as it would with no sleep feed at all.
-      MQ_DEBUG_PRINTLN(
-          "[get] no sleep reply and no sleep config, staying awake");
-    }
+    sleepOnLastCfg();
+  }
+}
+
+/*!
+    @brief  Queues a sleep on the last sleep config, for when the sleep feed
+            /get went unanswered or brought back nothing usable. A config from
+            this session, or from before a light sleep, is still in
+            _sleep_mode. After a deep sleep it is only in RTC memory. With
+            neither, nothing has ever told this board to sleep, so it stays
+            awake for a live publish, as it would with no sleep feed at all.
+*/
+void Adafruit_Marquee::sleepOnLastCfg() {
+  if (_is_sleep_pending)
+    return;
+  if (_sleep_mode != SLEEP_MODE_NONE || loadPrvSleepCfg()) {
+    MQ_DEBUG_PRINTLN("[sleep] using the last sleep config");
+    _is_sleep_pending = true;
+  } else {
+    MQ_DEBUG_PRINTLN("[sleep] no sleep config, staying awake");
   }
 }
 
@@ -1241,7 +1282,8 @@ bool Adafruit_Marquee::loadPrvSleepCfg() {
     return false;
   _sleep_mode = (mq_sleep_mode_t)prvSleepMode;
   _sleep_alarm = (mq_sleep_alarm_t)prvSleepAlarm;
-  _sleep_time = prvSleepTime;
+  // Stored clamped, but RTC memory could hold a value from older firmware
+  _sleep_time = max(prvSleepTime, (uint64_t)MQ_SLEEP_MIN_S);
   return true;
 #else
   return false;
@@ -1490,9 +1532,15 @@ bool Adafruit_Marquee::ioHoldActive() {
 void Adafruit_Marquee::cbSleepMsg(char *data, size_t len) {
   if (!_instance)
     return;
+  // A reply that is empty or will not parse is as good as none: a wake that
+  // was waiting on it falls back to the last config, as a timeout would.
+  bool awaited = _instance->_awaiting_sleep;
   _instance->_awaiting_sleep = false;
-  if (!data || len == 0)
+  if (!data || len == 0) {
+    if (awaited)
+      _instance->sleepOnLastCfg();
     return;
+  }
   MQ_DEBUG_PRINT("Sleep feed received <- ");
   MQ_DEBUG_PRINTLN(data);
 
@@ -1502,6 +1550,8 @@ void Adafruit_Marquee::cbSleepMsg(char *data, size_t len) {
   if (error) {
     MQ_DEBUG_PRINT("Sleep feed JSON parse failed");
     MQ_DEBUG_PRINTLN(error.c_str());
+    if (awaited)
+      _instance->sleepOnLastCfg();
     return;
   }
 
@@ -1515,13 +1565,30 @@ void Adafruit_Marquee::cbSleepMsg(char *data, size_t len) {
     _instance->_sleep_mode = SLEEP_MODE_DEEP;
   } else if (doc["sleep_mode"] == "light") {
     _instance->_sleep_mode = SLEEP_MODE_LIGHT;
+  } else if (doc["sleep_mode"] == "none") {
+    // An explicit "none" keeps a mains-powered display on for live pushes,
+    // and cancels a sleep queued by an earlier reply. Stored too, so a wake
+    // whose sleep feed goes quiet does not fall back to an older config.
+    MQ_DEBUG_PRINTLN("[sleep] sleep_mode none, staying awake");
+    _instance->_sleep_mode = SLEEP_MODE_NONE;
+    _instance->storeSleepCfg();
+    _instance->_is_sleep_pending = false;
+    return;
   } else {
-    // The editor only writes "light" or "deep". Anything else still asks the
-    // board to sleep, and on battery deep sleep is safer than staying awake.
+    // The editor only writes "light", "deep" or "none". Anything else still
+    // asks the board to sleep, and on battery deep sleep is safer than
+    // staying awake.
     MQ_DEBUG_PRINTLN("[sleep] unknown sleep_mode, using deep sleep");
     _instance->_sleep_mode = SLEEP_MODE_DEEP;
   }
-  _instance->_sleep_time = doc["sleep_time"] | 60;
+  // Read signed, so a negative value clamps up rather than wrapping
+  int64_t sleep_time = doc["sleep_time"] | (int64_t)60;
+  if (sleep_time < MQ_SLEEP_MIN_S) {
+    MQ_DEBUG_PRINTF("[sleep] sleep_time %lld is too short, using %d s\n",
+                    (long long)sleep_time, MQ_SLEEP_MIN_S);
+    sleep_time = MQ_SLEEP_MIN_S;
+  }
+  _instance->_sleep_time = (uint64_t)sleep_time;
   _instance->storeSleepCfg();
   _instance->_is_sleep_pending = true;
   MQ_DEBUG_PRINTLN("[sleep] Sleep feed stored, sleep pending");
@@ -1965,9 +2032,13 @@ void Adafruit_Marquee::handleSleep() {
     delay(500);
 
     if (rc != ESP_OK) {
-      // The session is already down and "sleeping" already sent, so staying
-      // awake would leave the board idle until the sleep feed is republished.
-      // The timer wakeup is still armed, so deep sleep instead.
+      // The session is already down and "sleeping" already sent. Staying
+      // awake would reconnect, ask for the feeds again, and on the sleep
+      // reply try the same light sleep again, so a failure that persists
+      // would loop through connect, publish and fail. The timer wakeup is
+      // still armed, so deep sleep instead and keep the schedule. The
+      // sleep_time clamp rules out IDF's too-short-duration error, so what
+      // remains is a rejected sleep, such as a wakeup source already pending.
       MQ_DEBUG_PRINTF("[sleep] ERROR: could not enter light sleep: %d, "
                       "entering deep sleep instead\n",
                       (int)rc);

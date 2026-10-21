@@ -94,6 +94,14 @@
   60000 ///< How long to wait for the bitmap and sleep feed /get replies before
         ///< giving up on them, in ms. Unanswered ones are re-sent once, half
         ///< way through.
+#define MQ_GET_REPLY_GRACE_MS                                                  \
+  15000 ///< The least time the /gets re-sent by a reconnect get before the
+        ///< deadline, in ms, enough for a ~21KB bitmap reply on a slow link
+#define MQ_SLEEP_MIN_S                                                         \
+  10 ///< Shortest sleep taken from the sleep feed, in seconds. Each wake
+     ///< reconnects and publishes, so a shorter cycle runs into IO's limits of
+     ///< 20 connects and 30 data points a minute, and a zero is too short for
+     ///< light sleep at all.
 #define MQ_IO_NOTICE_SUB_LEN                                                   \
   256 ///< Holds a {user}/throttle or {user}/errors message, in bytes
 
@@ -273,10 +281,15 @@ protected:
   bool _awaiting_sleep; ///< True while this session's sleep feed /get is still
                         ///< unanswered
   unsigned long _get_sent_at; ///< When the bitmap and sleep feed /gets were
-                              ///< first sent, in millis(). Not moved by a
-                              ///< reconnect while a reply is still due.
+                              ///< first sent, in millis(). A reconnect while
+                              ///< a reply is still due only moves it enough
+                              ///< to leave MQ_GET_REPLY_GRACE_MS.
   bool _get_resent;           ///< True once the unanswered /gets were re-sent
+  bool _get_held;             ///< True while an IO throttle or ban notice has
+                              ///< paused the wait, so the /gets are re-sent
+                              ///< and the deadline restarted once it lifts
   void checkFeedReplies();
+  void sleepOnLastCfg();
   char _feed_name_bmp[MAX_IO_FEED_NAME_LEN];   ///< Feed key for the bitmap feed
   char _feed_name_sleep[MAX_IO_FEED_NAME_LEN]; ///< Feed key for the sleep feed
   char _topic_bmp[MAX_IO_FEED_NAME_LEN + 96];  ///< {user}/f/{feed}/csv
