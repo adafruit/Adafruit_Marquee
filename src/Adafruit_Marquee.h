@@ -301,6 +301,8 @@ protected:
   void handleSleep();
   bool _is_sleep_pending;        ///< True if a sleep request is pending, False
                                  ///< otherwise
+  bool _sleep_hold_logged;       ///< True once handleSleep() has logged that it
+                                 ///< is holding off for a /get reply
   mq_sleep_mode_t _sleep_mode;   ///< Sleep mode
   mq_sleep_alarm_t _sleep_alarm; ///< Sleep alarm type
   uint64_t _sleep_time;          ///< Sleep duration, in seconds

@@ -434,6 +434,7 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _sleep_mode = SLEEP_MODE_NONE;
   _sleep_alarm = SLEEP_ALARM_NONE;
   _is_sleep_pending = false;
+  _sleep_hold_logged = false;
   _sleep_time = 60; // default to 60 seconds to avoid rapid wake/sleep cycling
 
   _batt_enabled = false;
@@ -1856,12 +1857,18 @@ void Adafruit_Marquee::handleSleep() {
     return;
   }
 
-  // Do not enter sleep until the bitmap message has been received and drawn
+  // Do not enter sleep until the bitmap message has been received and drawn,
+  // or checkFeedReplies() gives up on it. Logged once per hold, since the
+  // hold can last until MQ_GET_REPLY_TIMEOUT_MS.
   if (_awaiting_bmp || _awaiting_sleep) {
-    MQ_DEBUG_PRINTLN(
-        "[sleep] Holding off sleep until bitmap has been received");
+    if (!_sleep_hold_logged) {
+      MQ_DEBUG_PRINTLN(
+          "[sleep] Holding off sleep until bitmap has been received");
+      _sleep_hold_logged = true;
+    }
     return;
   }
+  _sleep_hold_logged = false;
 
   // If MQTT is not connected, try to reconnect up to 3 times so the "sleeping"
   // status can reach IO. Not while IO is throttling or banning the board: a
