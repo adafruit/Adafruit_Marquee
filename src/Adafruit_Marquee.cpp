@@ -659,7 +659,7 @@ void Adafruit_Marquee::displayStatus() {
         // the feed has none, rather than showing an error that no longer
         // applies.
         _display->clearBuffer();
-        _display->display();
+        _display->display(true);
         return;
       }
       // A Wi-Fi error can turn into an IO error once the router is back, or
@@ -984,7 +984,7 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
   // If we are waking from cold boot, push an empty buffer to clear the display
   // since there aren't any previous bitmaps to show or errors
   if (!didWakeFromSleep()) {
-    _display->display();
+    _display->display(true);
   }
 
   _status = SUCCESS;
@@ -1344,7 +1344,7 @@ void Adafruit_Marquee::displayErrorMsg(const char *title, const char *details,
     _display->print(label);
     _display->print(value ? value : "(missing)");
   }
-  _display->display();
+  _display->display(true);
 }
 
 /*!
