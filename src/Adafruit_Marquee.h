@@ -88,7 +88,8 @@
   60000 ///< How long an IO throttle or ban notice with no duration holds off
         ///< reconnects and publishes, in ms
 #define MQ_IO_HOLD_MAX_S                                                       \
-  3600 ///< Longest hold taken from an IO notice, in seconds (IO's ban cap)
+  3600 ///< Longest hold taken from an IO notice, in seconds (IO's nominal
+       ///< ban cap)
 #define MQ_IO_NOTICE_SUB_LEN                                                   \
   256 ///< Holds a {user}/throttle or {user}/errors message, in bytes
 

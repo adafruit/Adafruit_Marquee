@@ -919,8 +919,9 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
 
   // connectMqtt() also asks the feeds to republish, so there is nothing left
   // for this function to do once the session is up. A dropped connection or an
-  // unavailable broker gets a few quick retries first; IO's rate limit and ban
-  // do not, since connecting again sooner only extends them.
+  // unavailable broker gets a few quick retries first. IO's rate limit and ban
+  // (both 6) do not: every refused CONNECT counts toward the rate limit, and a
+  // ban lasts at least 30 s.
   bool connected = connectMqtt();
   for (uint8_t attempt = 1; !connected && attempt < MQ_MQTT_CONNECT_ATTEMPTS &&
                             mqttRetrySoon(_mqtt_rc);
@@ -954,9 +955,10 @@ bool Adafruit_Marquee::connect(unsigned long timeout) {
 /*!
  * @brief Whether an MQTT connect failure is worth retrying within seconds.
  * @param rc The result of Adafruit_MQTT::connect().
- * @returns True for no connection at all (-1: TCP, TLS or no CONNACK), for a
- *          session accepted but not subscribed (-2), and for "service
- *          unavailable" (3), which a short wait can fix.
+ * @returns True for no connection at all (-1: TCP, TLS or no CONNACK, as when
+ *          IO drops the socket of an IP it has banned), for a session accepted
+ *          but not subscribed (-2), and for "service unavailable" (3), which a
+ *          short wait can usually fix.
  */
 bool Adafruit_Marquee::mqttRetrySoon(int8_t rc) {
   return rc == -1 || rc == -2 || rc == 3;
@@ -967,10 +969,14 @@ bool Adafruit_Marquee::mqttRetrySoon(int8_t rc) {
  * @param rc The result of Adafruit_MQTT::connect().
  * @returns False for answers retrying cannot change: an unsupported protocol
  *          (1), a rejected client id (2), and malformed credentials (4). True
- *          for everything else. That includes "not authorized" (5), which IO
- *          also sends to refuse connects over its limit of 20 a minute until
- *          the minute is up, and 6 and 7, which Adafruit_MQTT names as a
- *          reconnect rate limit and a ban. All of these lift with time.
+ *          for everything else, which all lift with time. IO answers 6 both
+ *          for its connection rate limit (over 20 CONNECTs a minute per
+ *          username and IP; refused attempts count too, so retrying early
+ *          keeps it refusing) and for a temporary ban (30 s times the bans in
+ *          the last hour; CONNECTs during a ban do not extend it). IO answers
+ *          5 for a wrong key and also when it cannot check the key, so 5 is
+ *          not always permanent. IO never sends 7, though Adafruit_MQTT names
+ *          it a ban.
  */
 bool Adafruit_Marquee::mqttRetryLater(int8_t rc) {
   return rc != 1 && rc != 2 && rc != 4;
