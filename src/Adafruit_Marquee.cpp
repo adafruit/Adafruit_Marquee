@@ -30,8 +30,21 @@ static RTC_DATA_ATTR uint32_t
     prvBmpCrc; ///< CRC32 of the bitmap, stored before sleep
 #endif         // ARDUINO_ARCH_ESP32
 
+// Debug Delay -- allow time for usb to settle to see all the debug output
+// #define DEBUG_DELAY 1
+
+// Battery monitor. Only the MagTag is wired up so far; any board that defines
+// MQ_HAS_BATT_MONITOR, MQ_BATT_PIN and MQ_BATT_DIVIDER gets reporting.
+// All other boards just execute empty code -- xxxBattery() calls are NOPs
+#if defined(ARDUINO_MAGTAG29_ESP32S2)
+#define MQ_HAS_BATT_MONITOR 1
+#define MQ_BATT_PIN BATT_MONITOR // GPIO4 / A5, ADC1 so it's usable with WiFi on
+#define MQ_BATT_DIVIDER 2.0f     // 1:2 resistor divider on the MagTag
+#endif
+#define MQ_BATT_SAMPLES 16 ///< ADC samples averaged per battery reading
+
 // for flashTransport definition
-#define ADAFRUIT_MARQUEE_INTERNAL
+#define ADAFRUIT_MARQUEE_INTERNAL ///< Lets flash_config.h define flashTransport
 #include "flash_config.h"
 
 // Elm Chan's FatFs, vendored under src/fatfs/, is used only to format the
@@ -194,6 +207,33 @@ static bool formatFilesystem() {
   free(mem);
   flash.syncBlocks();
   return ok;
+}
+
+/*!
+    @brief  Rough state of charge for a 1S LiPo, from its resting voltage.
+    @param  volts  Battery voltage, in volts.
+    @return Estimated charge, 0-100 percent.
+*/
+static uint8_t convertBatteryVoltsToPercent(float volts) {
+  // Resting-voltage curve, linearly interpolated. Good to ~10%, which is
+  // as good as a voltage-only estimate gets.
+  static const struct {
+    float v;
+    uint8_t pct;
+  } curve[] = {{4.20f, 100}, {4.10f, 90}, {4.00f, 80}, {3.93f, 70},
+               {3.87f, 60},  {3.84f, 50}, {3.80f, 40}, {3.77f, 30},
+               {3.73f, 20},  {3.69f, 10}, {3.61f, 5},  {3.30f, 0}};
+  const size_t n = sizeof(curve) / sizeof(curve[0]);
+  if (volts >= curve[0].v)
+    return 100;
+  for (size_t i = 1; i < n; i++) {
+    if (volts >= curve[i].v) {
+      float frac = (volts - curve[i].v) / (curve[i - 1].v - curve[i].v);
+      return curve[i].pct +
+             (uint8_t)(frac * (curve[i - 1].pct - curve[i].pct) + 0.5f);
+    }
+  }
+  return 0;
 }
 
 /*!
@@ -384,6 +424,13 @@ Adafruit_Marquee::Adafruit_Marquee() {
   _sleep_alarm = SLEEP_ALARM_NONE;
   _is_sleep_pending = false;
   _sleep_time = 60; // default to 60 seconds to avoid rapid wake/sleep cycling
+
+  _batt_enabled = false;
+  _batt_as_percent = true;
+  _batt_pending = false;
+  _batt_volts = -1.0f;
+  _feed_name_battery = nullptr;
+  _topic_batt[0] = '\0';
 }
 
 /*!
@@ -464,6 +511,14 @@ mq_status_t Adafruit_Marquee::begin() {
   _status = parseDisplayCfg(cfg);
   if (_status != SUCCESS)
     return _status;
+
+#ifdef DEBUG_DLEAY
+  delay(3000);
+#endif
+
+  // Sample the battery now, before the EPD refresh or the radio load it down
+  parseBatteryCfg();
+  sampleBattery();
 
   const char *display_panel = _cfg_doc["display"]["panel"];
   if (!createEPD(display_panel))
@@ -681,6 +736,17 @@ bool Adafruit_Marquee::initMqtt() {
   snprintf(_topic_status, sizeof(_topic_status), "%s/f/%s", _aio_username,
            _feed_name_status);
 
+  // Build battery feed (publish only), if enabled
+  if (_batt_enabled) {
+    if (_feed_name_battery && _feed_name_battery[0] != '\0') {
+      snprintf(_topic_batt, sizeof(_topic_batt), "%s/f/%s", _aio_username,
+               _feed_name_battery);
+    } else {
+      snprintf(_topic_batt, sizeof(_topic_batt), "%s/f/%s.battery",
+               _aio_username, _device_name);
+    }
+  }
+
   // Attempt to register subscriptions
   if (!_mqtt->subscribe(_sub_bmp) || !_mqtt->subscribe(_sub_sleep)) {
     MQ_DEBUG_PRINTLN("Failed to register MQTT subscriptions");
@@ -693,6 +759,10 @@ bool Adafruit_Marquee::initMqtt() {
   MQ_DEBUG_PRINTLN(_topic_sleep);
   MQ_DEBUG_PRINT("Publishing status to: ");
   MQ_DEBUG_PRINTLN(_topic_status);
+  if (_batt_enabled) {
+    MQ_DEBUG_PRINT("Publishing battery to: ");
+    MQ_DEBUG_PRINTLN(_topic_batt);
+  }
   return true;
 }
 
@@ -752,6 +822,9 @@ bool Adafruit_Marquee::connectMqtt() {
   } else {
     publishStatus(payload);
   }
+
+  // Report the battery sample taken at boot (or on light-sleep wake)
+  publishBattery();
 
   // Ask for IO to republish the last data point on the bitmap feed.
   // handleSleep() holds a queued sleep until this reply lands, otherwise the
@@ -904,6 +977,82 @@ bool Adafruit_Marquee::publishStatus(const char *payload) {
   MQ_DEBUG_PRINT("[status] PUBLISHED -> ");
   MQ_DEBUG_PRINTLN(payload);
   return true;
+}
+
+/*!
+    @brief  Parses the optional "battery" object from the Marquee config.
+            Reporting stays off unless "enabled" is true and the board has a
+            battery monitor.
+*/
+void Adafruit_Marquee::parseBatteryCfg() {
+#ifdef MQ_HAS_BATT_MONITOR
+  JsonObject batt = _cfg_doc["battery"];
+  if (!batt) {
+    return;
+  }
+  bool en = batt["enabled"] | false;
+  if (!en) {
+    return; // This happens when battery.enabled is false or missing so don't
+            // log an error
+  }
+  MQ_DEBUG_PRINTLN("[batt] Battery enabled");
+  _batt_enabled = true;
+  // Battery feed is optional and defaults to group.battery if not set
+  _feed_name_battery =
+      batt["feed"].as<const char *>(); // nullptr if missing or not a string
+  // Assume percent unless user sets units to volts or Volts
+  const char *units = batt["units"] | "percent";
+  _batt_as_percent =
+      (strcmp(units, "volts") != 0 && strcmp(units, "Volts") != 0);
+#endif
+}
+
+/*!
+    @brief  Samples the battery voltage and queues it for publishing. Call
+            while the radio is off; WiFi TX sags the rail.
+*/
+void Adafruit_Marquee::sampleBattery() {
+#ifdef MQ_HAS_BATT_MONITOR
+  if (!_batt_enabled) {
+    return;
+  }
+  uint32_t mv = 0;
+  for (int i = 0; i < MQ_BATT_SAMPLES; i++) {
+    mv += analogReadMilliVolts(MQ_BATT_PIN);
+  }
+  _batt_volts = (mv / (float)MQ_BATT_SAMPLES) * MQ_BATT_DIVIDER / 1000.0f;
+  _batt_pending = true;
+  MQ_DEBUG_PRINTF("[batt] %.3f V, ~%u%%\n", _batt_volts,
+                  (unsigned)convertBatteryVoltsToPercent(_batt_volts));
+#endif
+}
+
+/*!
+    @brief  Publishes the pending battery sample, once. A failed publish is
+            retried on the next MQTT connect.
+*/
+void Adafruit_Marquee::publishBattery() {
+  if (!_batt_enabled || !_batt_pending || _topic_batt[0] == '\0' || !_mqtt ||
+      !_mqtt->connected()) {
+    return;
+  }
+
+  char payload[16];
+  if (_batt_as_percent) {
+    snprintf(payload, sizeof(payload), "%u",
+             (unsigned)convertBatteryVoltsToPercent(_batt_volts));
+  } else {
+    snprintf(payload, sizeof(payload), "%.2f", _batt_volts);
+  }
+
+  Adafruit_MQTT_Publish pub_batt(_mqtt, _topic_batt, MQTT_QOS_1);
+  if (!pub_batt.publish(payload)) {
+    MQ_DEBUG_PRINTLN("[batt] ERROR: Publish failed");
+    return;
+  }
+  _batt_pending = false;
+  MQ_DEBUG_PRINT("[batt] PUBLISHED -> ");
+  MQ_DEBUG_PRINTLN(payload);
 }
 
 /*!
@@ -1558,6 +1707,9 @@ void Adafruit_Marquee::handleSleep() {
     }
 
     MQ_DEBUG_PRINTF("[sleep] wake reason: %s\n", wakeupReason());
+
+    // Radio is still down, so this is a clean reading for the reconnect
+    sampleBattery();
 
     // Reconnect network on the next handleConnection() call
     _last_mqtt_attempt = millis() - _mqtt_retry_ms;
