@@ -30,6 +30,8 @@ static RTC_DATA_ATTR uint32_t
     prvBmpCrc; ///< CRC32 of the bitmap, stored before sleep
 static RTC_DATA_ATTR uint8_t
     prvSleepMode; ///< Last sleep mode from the sleep feed, an mq_sleep_mode_t
+static RTC_DATA_ATTR uint8_t
+    prvSleepAlarm; ///< Last alarm type from the sleep feed, an mq_sleep_alarm_t
 static RTC_DATA_ATTR uint64_t
     prvSleepTime; ///< Last sleep time from the sleep feed, in seconds
 #endif            // ARDUINO_ARCH_ESP32
@@ -887,22 +889,31 @@ bool Adafruit_Marquee::connectMqtt() {
   // Report the battery sample taken at boot (or on light-sleep wake)
   publishBattery();
 
+  if (didWakeFromSleep()) {
+    MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep!");
+  }
+
+  // A sleep is already queued and both replies are in, or were given up on,
+  // so this wake has what it needs. Asking again would restart the wait,
+  // such as when handleSleep() reconnects to send "sleeping" after
+  // checkFeedReplies() gave up, and a link that keeps dropping could then
+  // hold the board awake for good.
+  if (_is_sleep_pending && !_awaiting_bmp && !_awaiting_sleep) {
+    return true;
+  }
+
   // Ask for IO to republish the last data point on the bitmap feed.
   // handleSleep() holds a queued sleep until this reply lands, otherwise the
   // small sleep payload beats the ~21KB bitmap to the device and the panel
   // never updates. checkFeedReplies() gives up on it if IO never answers. A
-  // reconnect while a reply is still due keeps the original deadline, or a
-  // flaky link could hold the board awake for good.
+  // reconnect while a reply is still due keeps the original deadline, for the
+  // same reason.
   if (!_awaiting_bmp && !_awaiting_sleep) {
     _get_sent_at = millis();
     _get_resent = false;
   }
   _awaiting_bmp = true;
   getFromFeed(_topic_bmp);
-
-  if (didWakeFromSleep()) {
-    MQ_DEBUG_PRINTLN("[sleep] Device woke from sleep!");
-  }
 
   // Allow a cold boot with a sleep config from a feed to enter sleep after
   // drawing
@@ -1220,8 +1231,8 @@ void Adafruit_Marquee::storeBmpCRC(uint32_t crc) {
 
 /*!
     @brief  Restores the sleep config stored before the last sleep.
-    @return True if a config was stored and is now in _sleep_mode and
-            _sleep_time, False otherwise.
+    @return True if a config was stored and is now in _sleep_mode,
+            _sleep_alarm and _sleep_time, False otherwise.
 */
 bool Adafruit_Marquee::loadPrvSleepCfg() {
 #ifdef ARDUINO_ARCH_ESP32
@@ -1229,6 +1240,7 @@ bool Adafruit_Marquee::loadPrvSleepCfg() {
       (prvSleepMode != SLEEP_MODE_DEEP && prvSleepMode != SLEEP_MODE_LIGHT))
     return false;
   _sleep_mode = (mq_sleep_mode_t)prvSleepMode;
+  _sleep_alarm = (mq_sleep_alarm_t)prvSleepAlarm;
   _sleep_time = prvSleepTime;
   return true;
 #else
@@ -1243,6 +1255,7 @@ bool Adafruit_Marquee::loadPrvSleepCfg() {
 void Adafruit_Marquee::storeSleepCfg() {
 #ifdef ARDUINO_ARCH_ESP32
   prvSleepMode = (uint8_t)_sleep_mode;
+  prvSleepAlarm = (uint8_t)_sleep_alarm;
   prvSleepTime = _sleep_time;
 #endif // ARDUINO_ARCH_ESP32
 }
