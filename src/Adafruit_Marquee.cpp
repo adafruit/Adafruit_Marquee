@@ -1007,8 +1007,8 @@ bool Adafruit_Marquee::mqttRetrySoon(int8_t rc) {
  * @brief Whether an MQTT connect failure is worth retrying after a long wait.
  * @param rc The result of Adafruit_MQTT::connect().
  * @returns False for answers retrying cannot change: an unsupported protocol
- *          (1), a rejected client id (2), and malformed credentials (4). True
- *          for everything else, which all lift with time. IO answers 6 both
+ *          (1), a rejected client id (2), malformed credentials (4), and an
+ *          unallocated packet buffer (-3). True for everything else, which all lift with time. IO answers 6 both
  *          for its connection rate limit (over 20 CONNECTs a minute per
  *          username and IP; refused attempts count too, so retrying early
  *          keeps it refusing) and for a temporary ban (30 s times the bans in
@@ -1018,7 +1018,7 @@ bool Adafruit_Marquee::mqttRetrySoon(int8_t rc) {
  *          it a ban.
  */
 bool Adafruit_Marquee::mqttRetryLater(int8_t rc) {
-  return rc != 1 && rc != 2 && rc != 4;
+  return rc != 1 && rc != 2 && rc != 4 && rc != -3;
 }
 
 /*!

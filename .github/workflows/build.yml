@@ -51,12 +51,6 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          repository: brentru/Adafruit_MQTT_Library
-          ref: fix/widen-uint16_t
-          path: Adafruit_MQTT_Library
-
-      - uses: actions/checkout@v4
-        with:
           repository: brentru/Adafruit_EPD
           ref: add-driver-uc8279
           path: Adafruit_EPD
