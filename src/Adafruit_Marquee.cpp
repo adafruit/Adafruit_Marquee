@@ -1008,14 +1008,13 @@ bool Adafruit_Marquee::mqttRetrySoon(int8_t rc) {
  * @param rc The result of Adafruit_MQTT::connect().
  * @returns False for answers retrying cannot change: an unsupported protocol
  *          (1), a rejected client id (2), malformed credentials (4), and an
- *          unallocated packet buffer (-3). True for everything else, which all lift with time. IO answers 6 both
- *          for its connection rate limit (over 20 CONNECTs a minute per
- *          username and IP; refused attempts count too, so retrying early
- *          keeps it refusing) and for a temporary ban (30 s times the bans in
- *          the last hour; CONNECTs during a ban do not extend it). IO answers
- *          5 for a wrong key and also when it cannot check the key, so 5 is
- *          not always permanent. IO never sends 7, though Adafruit_MQTT names
- *          it a ban.
+ *          unallocated packet buffer (-3). True for everything else, which all
+ * lift with time. IO answers 6 both for its connection rate limit (over 20
+ * CONNECTs a minute per username and IP; refused attempts count too, so
+ * retrying early keeps it refusing) and for a temporary ban (30 s times the
+ * bans in the last hour; CONNECTs during a ban do not extend it). IO answers 5
+ * for a wrong key and also when it cannot check the key, so 5 is not always
+ * permanent. IO never sends 7, though Adafruit_MQTT names it a ban.
  */
 bool Adafruit_Marquee::mqttRetryLater(int8_t rc) {
   return rc != 1 && rc != 2 && rc != 4 && rc != -3;
