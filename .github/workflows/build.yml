@@ -45,25 +45,19 @@ jobs:
             bootloader_offset: "0x0"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: Adafruit_Marquee
 
-      - uses: actions/checkout@v4
-        with:
-          repository: brentru/Adafruit_MQTT_Library
-          ref: fix/widen-uint16_t
-          path: Adafruit_MQTT_Library
-
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: brentru/Adafruit_EPD
           ref: add-driver-uc8279
           path: Adafruit_EPD
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.13.0"
+          python-version: "3.13"
 
       - name: Install PlatformIO
         run: |
@@ -212,12 +206,12 @@ jobs:
     name: 🔎 Clang & Doxygen
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.13.0"
-      - uses: actions/checkout@v4
+          python-version: "3.13"
+      - uses: actions/checkout@v7
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: adafruit/ci-arduino
           path: ci

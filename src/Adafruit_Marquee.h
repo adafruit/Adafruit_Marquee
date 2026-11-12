@@ -262,7 +262,8 @@ protected:
                                     ///< in millis()
   int8_t _mqtt_rc; ///< Result of the last MQTT connect: 0 on success, -1 for
                    ///< no connection (also the value before any attempt), -2
-                   ///< for a failed subscribe, else the broker's CONNACK
+                   ///< for a failed subscribe, -3 for an unallocated
+                   ///< packet buffer, else the broker's CONNACK
                    ///< refusal; see Adafruit_MQTT::connectErrorString()
   unsigned long _io_hold_start;   ///< When the last IO throttle or ban notice
                                   ///< arrived, in millis()
